@@ -349,6 +349,7 @@ def main(
             print(
                 "WARNING: No wandb entity provided, running without logging to wandb."
             )
+            log_to_wandb = False
         else:
             locals_ = locals()
             if not os.environ["WANDB_API_KEY"]:
@@ -830,7 +831,8 @@ def main(
     print(f"Min loss: {min(all_test_losses):.4f}")
     print(f"Max accuracy: {max(all_test_accs) * 100:.2f}%")
 
-    wandb.finish()
+    if log_to_wandb:
+        wandb.finish()
 
 
 if __name__ == "__main__":

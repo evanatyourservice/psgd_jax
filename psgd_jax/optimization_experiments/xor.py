@@ -201,6 +201,7 @@ def main(
             print(
                 "WARNING: No wandb entity provided, running without logging to wandb."
             )
+            log_to_wandb = False
         else:
             locals_ = locals()
             if not os.environ["WANDB_API_KEY"]:
@@ -395,7 +396,8 @@ def main(
     average_steps = jnp.mean(step_solved[step_solved != -1])
     print(f"Average number of steps to solve: {average_steps}")
 
-    wandb.finish()
+    if log_to_wandb:
+        wandb.finish()
 
     return number_successful.item(), step_solved, average_steps.item()
 
