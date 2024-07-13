@@ -1,0 +1,9 @@
+jax
+jaxlib
+optax @ git+https://github.com/google-deepmind/optax@main
+flax
+wandb
+tensorflow-cpu
+tensorflow-datasets
+matplotlib
+einops
