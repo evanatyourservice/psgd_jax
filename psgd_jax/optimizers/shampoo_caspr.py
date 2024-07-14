@@ -1569,8 +1569,11 @@ def distributed_shampoo(
                 exponents.extend([exponent] * len(shapes))
 
             diagonal_statistics = _quantize_diagonal_statistics(jnp.zeros_like(param))
-            diagonal_momentum = _quantize_momentum(jnp.zeros_like(param))
-            momentum = _quantize_momentum(jnp.zeros_like(param))
+            if beta1 > 0:
+                diagonal_momentum = _quantize_momentum(jnp.zeros_like(param))
+                momentum = _quantize_momentum(jnp.zeros_like(param))
+            else:
+                diagonal_momentum, momentum = None, None
 
             local_stats_flat.append(
                 LocalShardedParameterStats(
@@ -1989,9 +1992,11 @@ def distributed_shampoo(
             if _graft_type_has_diagonal_statistics():
                 diagonal_statistics = jnp.zeros_like(param)
 
-            # TODO (evanatyourservice): don't keep momentum if using schedule-free
-            diagonal_momentum = _quantize_momentum(jnp.zeros_like(param))
-            momentum = _quantize_momentum(jnp.zeros_like(param))
+            if beta1 > 0:
+                diagonal_momentum = _quantize_momentum(jnp.zeros_like(param))
+                momentum = _quantize_momentum(jnp.zeros_like(param))
+            else:
+                diagonal_momentum, momentum = None, None
 
             return ParameterStats(
                 _quantize_diagonal_statistics(diagonal_statistics),
@@ -2983,13 +2988,16 @@ def distributed_shampoo(
 
         w = (1.0 - beta1) if moving_average_for_momentum else 1.0
 
-        shampoo_update_with_wd_momentum = (
-            state.momentum.to_float() * beta1 + w * shampoo_update_with_wd
-        )
+        shampoo_update_with_wd_momentum = shampoo_update_with_wd
+        grafting_update_with_wd_momentum = grafting_update_with_wd
+        if beta1 > 0.0:
+            shampoo_update_with_wd_momentum = (
+                state.momentum.to_float() * beta1 + w * shampoo_update_with_wd
+            )
 
-        grafting_update_with_wd_momentum = (
-            state.diagonal_momentum.to_float() * beta1 + w * grafting_update_with_wd
-        )
+            grafting_update_with_wd_momentum = (
+                state.diagonal_momentum.to_float() * beta1 + w * grafting_update_with_wd
+            )
 
         run_shampoo = (step >= start_preconditioning_step).astype(
             grafting_update_with_wd_momentum.dtype
@@ -3006,8 +3014,7 @@ def distributed_shampoo(
         )
 
         nesterov_momentum_update = momentum_update
-
-        if nesterov:
+        if nesterov and beta1 > 0.0:
             nesterov_momentum_update = w * wd_update + beta1 * momentum_update
 
         if weight_decay != 0 and weight_decay is not None and decoupled_weight_decay:
@@ -3019,15 +3026,19 @@ def distributed_shampoo(
         momentum_multiplier = lr if decoupled_learning_rate else 1.0
         transformed_update = -1.0 * momentum_multiplier * nesterov_momentum_update
 
-        new_diagonal_momentum = grafting_update_with_wd_momentum
-        new_momentum = shampoo_update_with_wd_momentum
+        if beta1 > 0.0:
+            new_diagonal_momentum = _quantize_momentum(grafting_update_with_wd_momentum)
+            new_momentum = _quantize_momentum(shampoo_update_with_wd_momentum)
+        else:
+            new_diagonal_momentum = state.diagonal_momentum
+            new_momentum = state.momentum
 
         param_stats = ParameterStats(
             _quantize_diagonal_statistics(new_diagonal_statistics),
             state.statistics,
             state.preconditioners,
-            _quantize_momentum(new_diagonal_momentum),
-            _quantize_momentum(new_momentum),
+            new_diagonal_momentum,
+            new_momentum,
             state.training_metrics,
         )
 
