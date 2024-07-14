@@ -1,13 +1,17 @@
 # PSGD (Preconditioned Stochastic Gradient Descent)
 
-Implementations of [PSGD optimizer](https://github.com/lixilinx/psgd_torch) variants (XMat, UVd, Affine) along with a 
-couple experiments for optimizer testing/comparison including temporal XOR problem and image classification.
+Implementations of [PSGD optimizer](https://github.com/lixilinx/psgd_torch) variants (XMat, UVd, Affine) in JAX along 
+with a couple experiments for optimizer testing/comparison including temporal XOR problem and image classification. 
+PSGD is a second-order optimizer created by Xi-Lin Li that uses a hessian-based preconditioner and lie groups to 
+improve convergence, generalization performance, and efficiency.
 
-This repo is in early stages and will be updated soon with more features and documentation. Please feel free to 
-open issues with any bug reports, feature requests, or questions! PyPI package coming soon.
-
+This repo is in very early stages and will be updated soon with more features and documentation (see roadmap below). 
+The goal is to create a scalable distributed framework for testing optimizers on larger-scale problems to help further
+optimization research. Please feel free to open issues with any bug reports, feature requests, or questions! PyPI 
+package coming soon.
 
 Available optimizers from psgd_jax/optimizers/create_optimizer.py:
+- Any below can be wrapped with schedule-free (https://github.com/facebookresearch/schedule_free)
 - PSGD
 - shampoo
 - CASPR
@@ -26,7 +30,6 @@ Available optimizers from psgd_jax/optimizers/create_optimizer.py:
 - adabelief
 - novograd
 - adam3 (https://github.com/wyzjack/AdaM3)
-- Any of the above can be wrapped with schedule-free (https://github.com/facebookresearch/schedule_free)
 
 
 ## Installation
@@ -87,7 +90,7 @@ distributed framework with which to test optimizers on larger-scale problems to 
 
 ## Resources
 
-Listed from Xi-Lin's repo
+PSGD papers and resources listed from Xi-Lin's repo
 
 1) Preconditioned stochastic gradient descent, [arXiv:1512.04202](https://arxiv.org/abs/1512.04202), 2015. (General ideas of PSGD, preconditioner fitting losses and Kronecker product preconditioners.)
 2) Preconditioner on matrix Lie group for SGD, [arXiv:1809.10232](https://arxiv.org/abs/1809.10232), 2018. (Focus on preconditioners with the affine Lie group.)
