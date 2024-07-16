@@ -36,6 +36,14 @@ Available optimizers from psgd_jax/optimizers/create_optimizer.py:
 
 Use python 3.10-3.12 (mostly tested on 3.11)
 
+Installing correct venv:
+```bash
+sudo add-apt-repository ppa:deadsnakes/ppa
+sudo apt update
+sudo apt install python3.12
+sudo apt-get install python3.12-venv
+```
+
 Clone the repository:
 ```bash
 git clone https://github.com/evanatyourservice/psgd_jax.git
