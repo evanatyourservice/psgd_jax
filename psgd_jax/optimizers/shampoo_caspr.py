@@ -1259,7 +1259,7 @@ def distributed_shampoo(
     best_effort_shape_interpretation=True,
     graft_type=GraftingType.RMSPROP_NORMALIZED,
     nesterov=True,
-    exponent_override=4,
+    exponent_override=0,
     # Pass pmap 'batch axis name' in pmap mode.
     batch_axis_name=None,
     ### Only set following 3 params in pjit/spmd mode.
