@@ -15,10 +15,6 @@ from psgd_jax.optimizers.first_order_optimizers import scale_by_adam
 from psgd_jax.optimizers.optimizer_utils import hvp, norm_grad_layerwise
 
 
-def rsqrt(x):
-    return jnp.reciprocal(jnp.sqrt(x))
-
-
 def add_eps(x):
     return jnp.where(x == 0, jnp.finfo(x.dtype).tiny, x)
 
@@ -546,7 +542,8 @@ def _update_precond_UVd_math(
         nablaD = Ph * h - v * invPv
         if step_normalizer == "2nd":
             mu = precond_lr * jnp.min(
-                rsqrt(add_eps(Ph * Ph + v * v)) * rsqrt(add_eps(h * h + invPv * invPv))
+                jax.lax.rsqrt(add_eps(Ph * Ph + v * v))
+                * jax.lax.rsqrt(add_eps(h * h + invPv * invPv))
             )  # two seperate rsqrt's to avoid underflow
         else:
             mu = precond_lr / add_eps(jnp.max(jnp.abs(nablaD)))
