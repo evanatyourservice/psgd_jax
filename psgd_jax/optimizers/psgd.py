@@ -758,10 +758,10 @@ def _shape_as_matrix(x: jax.Array) -> tuple:
                 pair[1] for pair in sorted([(k, i) for (i, k) in enumerate(opt_p)])
             )
             return (
-                lambda u, permute=opt_p, shape=mtx_shape: u.permute(permute).reshape(
+                lambda u, permute=opt_p, shape=mtx_shape: u.transpose(permute).reshape(
                     shape
                 ),
-                lambda v, permute=q, shape=opt_s: v.reshape(shape).permute(permute),
+                lambda v, permute=q, shape=opt_s: v.reshape(shape).transpose(permute),
                 mtx_shape,
             )
 
