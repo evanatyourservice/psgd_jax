@@ -96,11 +96,16 @@ class Transformer(nn.Module):
             )
             x = jnp.concatenate([x, empty_registers], axis=1)
 
-        x = flax_scan(TransformerBlock, length=self.n_layers, unroll=2)(
+        """x = flax_scan(TransformerBlock, length=self.n_layers, unroll=2)(
             n_heads=self.n_heads,
             dropout_rate=self.dropout_rate,
             is_training=is_training,
-        )(x)
+        )(x)"""
+        for _ in range(self.n_layers):
+            # TODO (evanatyourservice): for loop until psgd handles scanned layers
+            x = TransformerBlock(n_heads=self.n_heads, dropout_rate=self.dropout_rate)(
+                x, is_training=is_training
+            )
 
         x = nn.LayerNorm(use_bias=False)(x[:, 0])  # take cls token
 
