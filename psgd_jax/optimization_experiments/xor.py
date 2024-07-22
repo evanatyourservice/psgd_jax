@@ -2,6 +2,8 @@ import os
 import time
 from functools import partial
 from pprint import pprint
+from typing import Optional
+
 import wandb
 
 import jax
@@ -142,6 +144,8 @@ def main(
     psgd_rank: int = 10,
     psgd_update_probability: float = 1.0,
     psgd_precond_lr: float = 0.01,
+    psgd_precond_init_scale: Optional[float] = None,
+    psgd_whitening: bool = False,
     mu_dtype: str = "float32",
 ):
     """Train a model on the XOR task.
@@ -189,6 +193,8 @@ def main(
         psgd_rank: int, rank for UVd psgd.
         psgd_update_probability: float, precond update probability for psgd.
         psgd_precond_lr: float, preconditioner learning rate for psgd.
+        psgd_precond_init_scale: float, initial scale for the preconditioner.
+        psgd_whitening: bool, whether to use whitening for psgd.
         mu_dtype: str, momentum dtype for the optimizer.
     """
     lr_schedule = "linear_warmup" if schedule_free else lr_schedule
@@ -278,6 +284,8 @@ def main(
         psgd_rank=psgd_rank,
         psgd_update_prob=psgd_update_probability,
         psgd_precond_lr=psgd_precond_lr,
+        psgd_precond_init_scale=psgd_precond_init_scale,
+        psgd_whitening=psgd_whitening,
         cooldown_steps=cooldown_steps,
         mu_dtype=mu_dtype,
     )

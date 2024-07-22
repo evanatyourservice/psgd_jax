@@ -55,7 +55,7 @@ parser = argparse.ArgumentParser()
 
 
 # wandb
-parser.add_argument("--log_to_wandb", type=str2bool, default=False)
+parser.add_argument("--log_to_wandb", type=str2bool, default=True)
 parser.add_argument("--wandb_entity", type=str, default="")
 parser.add_argument("--wandb_project", type=str, default="opt_image_classification")
 
@@ -67,7 +67,7 @@ parser.add_argument(
     default="cifar10",
     choices=["cifar10", "cifar100", "imagenet", "imagenette"],
 )
-parser.add_argument("--batch_size", type=int, default=4)
+parser.add_argument("--batch_size", type=int, default=256)
 parser.add_argument("--n_epochs", type=int, default=200)
 parser.add_argument("--bfloat16", type=str2bool, default=False)
 parser.add_argument(
@@ -92,12 +92,12 @@ ViT-Huge 32 1280 16
 parser.add_argument(
     "--model_type",
     type=str,
-    default="vit",
+    default="resnet18",
     choices=["resnettiny", "resnet18", "resnet50", "vit"],
 )
-parser.add_argument("--n_layers", type=int, default=1, help="ViT only.")
-parser.add_argument("--enc_dim", type=int, default=32, help="ViT only.")
-parser.add_argument("--n_heads", type=int, default=2, help="ViT only.")
+parser.add_argument("--n_layers", type=int, default=12, help="ViT only.")
+parser.add_argument("--enc_dim", type=int, default=768, help="ViT only.")
+parser.add_argument("--n_heads", type=int, default=12, help="ViT only.")
 parser.add_argument(
     "--n_empty_registers",
     type=int,
@@ -119,7 +119,7 @@ parser.add_argument(
         "1-sqrt cooldown from https://arxiv.org/abs/2405.18392."
     ),
 )
-parser.add_argument("--warmup_steps", type=int, default=1000)
+parser.add_argument("--warmup_steps", type=int, default=512)
 parser.add_argument(
     "--cooldown_steps",
     type=int,
@@ -184,7 +184,7 @@ parser.add_argument(
         "and scales the entire gradient to have unit norm i.e. grad/||grad||_2."
     ),
 )
-parser.add_argument("--beta1", type=float, default=0.9)
+parser.add_argument("--beta1", type=float, default=0.0)
 parser.add_argument("--beta2", type=float, default=0.999)
 parser.add_argument("--epsilon", type=float, default=1e-8)
 parser.add_argument(
@@ -239,7 +239,9 @@ parser.add_argument(
 )
 parser.add_argument("--psgd_rank", type=int, default=4, help="For psgd LRA/UVd.")
 parser.add_argument("--psgd_update_probability", type=float, default=0.1)
-parser.add_argument("--psgd_precond_lr", type=float, default=0.01)
+parser.add_argument("--psgd_precond_lr", type=float, default=0.1)
+parser.add_argument("--psgd_precond_init_scale", type=float, default=None)
+parser.add_argument("--psgd_whitening", type=str2bool, default=False)
 parser.add_argument(
     "--mu_dtype",
     type=str,
@@ -305,6 +307,8 @@ def main(
     psgd_rank: int,
     psgd_update_probability: float,
     psgd_precond_lr: float,
+    psgd_precond_init_scale: Optional[float],
+    psgd_whitening: bool,
     mu_dtype: str,
 ):
     # TODO (evanatyourservice): allow for custom optimizer pass in
@@ -501,6 +505,8 @@ def main(
         psgd_rank=psgd_rank,
         psgd_update_prob=psgd_update_probability,
         psgd_precond_lr=psgd_precond_lr,
+        psgd_precond_init_scale=psgd_precond_init_scale,
+        psgd_whitening=psgd_whitening,
         cooldown_steps=cooldown_steps,
         mu_dtype=mu_dtype,
     )

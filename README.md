@@ -58,7 +58,7 @@ pip install -U pip && pip install psgd_jax/
 
 GPU:
 ```bash
-pip install -U pip && pip install -U "jax[cuda12]" && pip install psgd_jax/
+pip install -U pip && pip install -U "jax[cuda12]==0.4.30" && pip install psgd_jax/
 ```
 
 TPU:

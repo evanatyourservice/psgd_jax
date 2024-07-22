@@ -1223,7 +1223,7 @@ def _add_metrics_into_local_stats(local_stats, metrics, keep_old):
 
 
 def batch(x, num_devices):
-    """Batch `x` so that so that leading axis is num_devices."""
+    """Batch `x` so that leading axis is num_devices."""
     n = len(x)
     b = int(n / num_devices)
     return jnp.stack([jnp.stack(x[idx : idx + b]) for idx in range(0, n, b)])
