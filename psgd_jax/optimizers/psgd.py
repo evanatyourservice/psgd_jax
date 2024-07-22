@@ -45,7 +45,8 @@ def scale_by_psgd(
     affine_max_skew_triangular: int = 128,
     update_probability: float = 1.0,
     step_normalizer: str = "2nd",
-    precond_lr: Union[float, Callable[[int], float]] = 0.01,
+    precond_lr: Union[float, Callable[[int], float]] = 0.1,
+    precond_init_scale: Optional[float] = None,
     seed: Optional[PRNGKey] = None,
     feed_into_adam: bool = False,
     graft_adam_lr: bool = False,
@@ -73,6 +74,7 @@ def scale_by_psgd(
         update_probability: float, probability of updating the preconditioner.
         step_normalizer: str, '1st' or '2nd'.
         precond_lr: float or callable, learning rate for the preconditioner.
+        precond_init_scale: optional float, initial scale for the preconditioner.
         seed: Optional PRNGKey, random seed.
         feed_into_adam: bool, whether to feed the preconditioned gradients into
             adam optimizer.
@@ -80,8 +82,10 @@ def scale_by_psgd(
         adam_b2: float, beta2 parameter for the grafting optimizer.
         adam_norm_grads_layerwise: bool, whether to normalize gradients before
             grafting optimizer.
-        mu_dtype: str or jnp.dtype, dtype of the momentum accumulator.
-        precond_dtype: str or jnp.dtype, dtype of the preconditioner.
+        mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
+            Defaults to the same dtype as the parameters.
+        precond_dtype: optional str or jnp.dtype, dtype of the preconditioner.
+            Defaults to the same dtype as the parameters.
         pmap_axis_name: str, axis name for pmap.
         precision: str, precision for matmul, 'bfloat16', 'tensorfloat32', 'float32'.
 
@@ -209,10 +213,12 @@ def scale_by_psgd(
                     [jnp.reshape(x, goal_shape) for x in jax.tree.leaves(Hvs)], 0
                 )
                 # init U
+                if precond_init_scale is not None:
+                    init_scale = precond_init_scale
+                else:
+                    init_scale = (jnp.sum(v * v) / jnp.sum(h * h)) ** 0.25
                 U = jax.lax.cond(
-                    state.count == 0,
-                    lambda: state.U * (jnp.sum(v * v) / jnp.sum(h * h)) ** 0.25,
-                    lambda: state.U,
+                    state.count == 0, lambda: state.U * init_scale, lambda: state.U
                 )
                 # update preconditioner
                 U, V = _update_precond_Xmat_math_(
@@ -228,10 +234,12 @@ def scale_by_psgd(
                     [jnp.reshape(x, goal_shape) for x in jax.tree.leaves(Hvs)], 0
                 )
                 # init d
+                if precond_init_scale is not None:
+                    init_scale = precond_init_scale
+                else:
+                    init_scale = (jnp.sum(v * v) / jnp.sum(h * h)) ** 0.25
                 d = jax.lax.cond(
-                    state.count == 0,
-                    lambda: state.d * (jnp.sum(v * v) / jnp.sum(h * h)) ** 0.25,
-                    lambda: state.d,
+                    state.count == 0, lambda: state.d * init_scale, lambda: state.d
                 )
                 # update preconditioner
                 key, subkey = jax.random.split(key)
@@ -256,17 +264,19 @@ def scale_by_psgd(
                     r[0](x)
                     for x, r in zip(jax.tree.leaves(Hvs), state.affine_reshapers)
                 ]
+
                 # init Qs
+                def init_q(v, h):
+                    if precond_init_scale is not None:
+                        return precond_init_scale
+                    else:
+                        return (jnp.sum(v * v.conj()) / jnp.sum(h * h.conj())) ** 0.25
+
                 Qs = jax.lax.cond(
                     state.count == 0,
                     lambda: [
-                        [
-                            ((jnp.sum(v * v.conj()) / jnp.sum(h * h.conj())) ** 0.25)
-                            ** 0.5
-                            * q
-                            for q in Qlr
-                        ]
-                        for (v, h, Qlr) in zip(vs, Hvs, state.Qs)
+                        [init_q(v, h) ** 0.5 * q for q in Qlr]
+                        for v, h, Qlr in zip(vs, Hvs, state.Qs)
                     ],
                     lambda: state.Qs,
                 )
@@ -426,13 +436,15 @@ def psgd(
     affine_max_skew_triangular: int = 128,
     update_probability: float = 1.0,
     step_normalizer: str = "2nd",
-    precond_lr: Union[float, Callable[[int], float]] = 0.01,
+    precond_lr: Union[float, Callable[[int], float]] = 0.1,
+    precond_init_scale: Optional[float] = None,
     seed: Optional[PRNGKey] = None,
     feed_into_adam: bool = False,
     graft_adam_lr: bool = False,
     adam_b2: float = 0.999,
     adam_norm_grads_layerwise: bool = False,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
+    precond_dtype: Optional[Union[str, jnp.dtype]] = None,
     pmap_axis_name: Optional[str] = None,
     precision: str = "float32",
 ) -> base.GradientTransformationExtraArgs:
@@ -440,7 +452,7 @@ def psgd(
     Implements UVd and XMat PSGD from https://arxiv.org/abs/2211.04422.
 
     Args:
-        learning_rate: float or callable, learning rate.
+        learning_rate: float or callable, learning rate for the optimizer.
         preconditioner_type: str, 'xmat', 'uvd', or 'affine'.
         b1: float, momentum parameter.
         heavyball: bool, whether to use Heavyball momentum.
@@ -456,6 +468,7 @@ def psgd(
         update_probability: float, probability of updating the preconditioner.
         step_normalizer: str, '1st' or '2nd'.
         precond_lr: float or callable, learning rate for the preconditioner.
+        precond_init_scale: optional float, initial scale for the preconditioner.
         seed: Optional PRNGKey, random seed.
         feed_into_adam: bool, whether to feed the preconditioned gradients into
             adam optimizer.
@@ -463,7 +476,10 @@ def psgd(
         adam_b2: float, beta2 parameter for the grafting optimizer.
         adam_norm_grads_layerwise: bool, whether to normalize gradients before
             grafting optimizer.
-        mu_dtype: str or jnp.dtype, dtype of the momentum accumulator.
+        mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
+            Defaults to the same dtype as the parameters.
+        precond_dtype: optional str or jnp.dtype, dtype of the preconditioner.
+            Defaults to the same dtype as the parameters.
         pmap_axis_name: str, axis name for pmap.
         precision: str, precision for matmul, 'bfloat16', 'tensorfloat32', 'float32'.
 
@@ -483,12 +499,14 @@ def psgd(
             update_probability=update_probability,
             step_normalizer=step_normalizer,
             precond_lr=precond_lr,
+            precond_init_scale=precond_init_scale,
             seed=seed,
             feed_into_adam=feed_into_adam,
             graft_adam_lr=graft_adam_lr,
             adam_b2=adam_b2,
             adam_norm_grads_layerwise=adam_norm_grads_layerwise,
             mu_dtype=mu_dtype,
+            precond_dtype=precond_dtype,
             pmap_axis_name=pmap_axis_name,
             precision=precision,
         )
@@ -931,7 +949,7 @@ if __name__ == "__main__":
 
     lr = optax.linear_schedule(0.1, 0.0, 100)
 
-    opt = psgd(lr, "uvd")
+    opt = psgd(lr, "affine")
     opt_state = opt.init(params)
 
     def dummy_loss_fn(params):

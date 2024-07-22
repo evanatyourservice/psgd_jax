@@ -55,7 +55,7 @@ parser = argparse.ArgumentParser()
 
 
 # wandb
-parser.add_argument("--log_to_wandb", type=str2bool, default=True)
+parser.add_argument("--log_to_wandb", type=str2bool, default=False)
 parser.add_argument("--wandb_entity", type=str, default="")
 parser.add_argument("--wandb_project", type=str, default="opt_image_classification")
 
@@ -67,7 +67,7 @@ parser.add_argument(
     default="cifar10",
     choices=["cifar10", "cifar100", "imagenet", "imagenette"],
 )
-parser.add_argument("--batch_size", type=int, default=256)
+parser.add_argument("--batch_size", type=int, default=4)
 parser.add_argument("--n_epochs", type=int, default=200)
 parser.add_argument("--bfloat16", type=str2bool, default=False)
 parser.add_argument(
@@ -92,12 +92,12 @@ ViT-Huge 32 1280 16
 parser.add_argument(
     "--model_type",
     type=str,
-    default="resnet18",
+    default="vit",
     choices=["resnettiny", "resnet18", "resnet50", "vit"],
 )
-parser.add_argument("--n_layers", type=int, default=12, help="ViT only.")
-parser.add_argument("--enc_dim", type=int, default=768, help="ViT only.")
-parser.add_argument("--n_heads", type=int, default=12, help="ViT only.")
+parser.add_argument("--n_layers", type=int, default=1, help="ViT only.")
+parser.add_argument("--enc_dim", type=int, default=32, help="ViT only.")
+parser.add_argument("--n_heads", type=int, default=2, help="ViT only.")
 parser.add_argument(
     "--n_empty_registers",
     type=int,
