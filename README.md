@@ -58,12 +58,12 @@ pip install -U pip && pip install psgd_jax/
 
 GPU:
 ```bash
-pip install -U pip && pip install -U "jax[cuda12]==0.4.30" && pip install psgd_jax/
+pip install -U pip && pip install psgd_jax/ && pip install --force-reinstall --upgrade --no-cache-dir "jax[cuda12]"
 ```
 
 TPU:
 ```bash
-pip install -U pip && pip install jaxlib==0.4.30 "jax[tpu]==0.4.30" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html && pip install psgd_jax/
+pip install -U pip && pip install psgd_jax/ && pip install --force-reinstall --upgrade --no-cache-dir "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 ```
 
 

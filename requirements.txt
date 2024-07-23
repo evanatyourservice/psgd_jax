@@ -1,5 +1,5 @@
-jax==0.4.30
-jaxlib==0.4.30
+jax
+jaxlib
 optax @ git+https://github.com/google-deepmind/optax@main
 flax
 wandb
