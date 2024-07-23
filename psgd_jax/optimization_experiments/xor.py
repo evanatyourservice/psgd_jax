@@ -12,7 +12,7 @@ import optax
 import flax.linen as nn
 
 from psgd_jax.optimizers.create_optimizer import create_optimizer
-from psgd_jax.image_classification.network_utils import normal_init, flax_scan
+from psgd_jax.image_classification.network_utils import normal_init
 from psgd_jax.image_classification.models.ViT import LearnablePositionalEncoding
 
 
@@ -94,9 +94,8 @@ class Transformer(nn.Module):
         x = LearnablePositionalEncoding()(x)
 
         # transformer blocks
-        x = flax_scan(TransformerBlock, length=self.n_layers, unroll=2)(
-            n_heads=self.n_heads, ff_dim=self.ff_dim
-        )(x)
+        for _ in range(self.n_layers):
+            x = TransformerBlock(n_heads=self.n_heads, ff_dim=self.ff_dim)(x)
         x = nn.LayerNorm(use_bias=False)(x)
 
         # mean pool
@@ -114,10 +113,10 @@ def main(
     batch_size: int = 128,
     seq_len: int = 16,
     model_type: str = "rnn",
-    dim_hidden: int = 30,
+    dim_hidden: int = 32,
     n_layers: int = 1,
     n_heads: int = 2,
-    ff_dim: int = 16,
+    ff_dim: int = 32,
     group_n_train_steps: int = 100,
     learning_rate: float = 0.01,
     min_learning_rate: float = 0.0,
@@ -128,7 +127,7 @@ def main(
     optimizer: str = "psgd",
     norm_grads: bool = False,
     norm_grad_type: str = "global",
-    beta1: float = 0.0,
+    beta1: float = 0.9,
     beta2: float = 0.999,
     epsilon: float = 1e-8,
     nesterov: bool = False,
@@ -413,15 +412,15 @@ def main(
 if __name__ == "__main__":
     fn = partial(
         main,
-        log_to_wandb=True,
+        log_to_wandb=False,
         wandb_entity="",
         seed=5,
         criteria_threshold=0.05,
         total_steps=100_000,
         batch_size=128,
-        seq_len=32,
+        seq_len=64,
         model_type="rnn",
-        dim_hidden=30,
+        dim_hidden=32,
         n_layers=1,
         n_heads=2,
         ff_dim=16,
@@ -429,7 +428,7 @@ if __name__ == "__main__":
         learning_rate=0.01,
         min_learning_rate=0.0,
         lr_schedule="linear",
-        warmup_steps=100,
+        warmup_steps=0,
         cooldown_steps=0,
         schedule_free=False,
         optimizer="psgd",
@@ -439,7 +438,7 @@ if __name__ == "__main__":
         beta2=0.999,
         epsilon=1e-8,
         nesterov=False,
-        weight_decay=1e-6,
+        weight_decay=1e-8,
         gradient_clip=1.0,
         graft=False,
         precondition_every_n=10,
@@ -474,7 +473,13 @@ if __name__ == "__main__":
     print("TESTING CASPR")
     t_start = time.time()
     number_successful, step_solved, average_steps = jax.block_until_ready(
-        fn(learning_rate=0.0003, optimizer="caspr", graft=True, precondition_every_n=5)
+        fn(
+            learning_rate=0.0003,
+            optimizer="caspr",
+            beta1=0.9,
+            graft=True,
+            precondition_every_n=5,
+        )
     )
     time_taken = time.time() - t_start
     print(f"Time taken: {time_taken:.2f}s")
@@ -515,7 +520,7 @@ if __name__ == "__main__":
     print("TESTING ADAM")
     t_start = time.time()
     number_successful, step_solved, average_steps = jax.block_until_ready(
-        fn(learning_rate=0.0001, optimizer="adam")
+        fn(learning_rate=0.0001, optimizer="adam", beta1=0.9)
     )
     time_taken = time.time() - t_start
     print(f"Time taken: {time_taken:.2f}s")
@@ -532,7 +537,7 @@ if __name__ == "__main__":
     print("TESTING ADABELIEF")
     t_start = time.time()
     number_successful, step_solved, average_steps = jax.block_until_ready(
-        fn(learning_rate=0.0001, optimizer="adabelief")
+        fn(learning_rate=0.0001, optimizer="adabelief", beta1=0.9)
     )
     time_taken = time.time() - t_start
     print(f"Time taken: {time_taken:.2f}s")
