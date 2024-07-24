@@ -111,7 +111,7 @@ def main(
     criteria_threshold: float = 0.05,
     total_steps: int = 100000,
     batch_size: int = 128,
-    seq_len: int = 16,
+    seq_len: int = 32,
     model_type: str = "rnn",
     dim_hidden: int = 32,
     n_layers: int = 1,
@@ -412,18 +412,18 @@ def main(
 if __name__ == "__main__":
     fn = partial(
         main,
-        log_to_wandb=False,
+        log_to_wandb=True,
         wandb_entity="",
         seed=5,
         criteria_threshold=0.05,
         total_steps=100_000,
         batch_size=128,
-        seq_len=64,
+        seq_len=50,
         model_type="rnn",
         dim_hidden=32,
         n_layers=1,
         n_heads=2,
-        ff_dim=16,
+        ff_dim=32,
         group_n_train_steps=100,
         learning_rate=0.01,
         min_learning_rate=0.0,
@@ -438,7 +438,7 @@ if __name__ == "__main__":
         beta2=0.999,
         epsilon=1e-8,
         nesterov=False,
-        weight_decay=1e-8,
+        weight_decay=1e-6,
         gradient_clip=1.0,
         graft=False,
         precondition_every_n=10,
@@ -447,7 +447,7 @@ if __name__ == "__main__":
         psgd_precond_type="uvd",
         psgd_feed_into_adam=False,
         psgd_heavyball=False,
-        psgd_rank=10,
+        psgd_rank=16,
         psgd_update_probability=1.0,
         psgd_precond_lr=0.01,
         mu_dtype="float32",
@@ -455,7 +455,7 @@ if __name__ == "__main__":
 
     results = []
 
-    print("TESTING PSGD UVD RANK 10")
+    print("TESTING PSGD UVD")
     t_start = time.time()
     number_successful, step_solved, average_steps = jax.block_until_ready(fn())
     time_taken = time.time() - t_start

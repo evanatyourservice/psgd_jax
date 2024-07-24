@@ -608,6 +608,66 @@ def _IpUVtmatvec(U, V, x):
     return x + jnp.matmul(U, jnp.matmul(V.T, x))
 
 
+def _solve_triangular(a, b, upper, left=True):
+    """jax.lax.linalg.triangular_solve rewritten to match PyTorch convention."""
+    return jax.lax.linalg.triangular_solve(a, b, left_side=left, lower=not upper)
+
+
+def doolittle(A: jax.Array) -> Tuple[jax.Array, jax.Array]:
+    # source https://johnfoster.pge.utexas.edu/numerical-methods-book/LinearAlgebra_LU.html
+    assert A.shape[0] == A.shape[1], "Matrix must be square"
+    n = A.shape[0]
+    U = jnp.zeros_like(A)
+    L = jnp.eye(n, dtype=A.dtype)
+    for k in range(n):
+        U = U.at[k, k:].set(A[k, k:] - L[k, :k] @ U[:k, k:])
+        L = L.at[(k + 1) :, k].set(
+            (A[(k + 1) :, k] - L[(k + 1) :, :] @ U[:, k]) / U[k, k]
+        )
+    return L, U
+
+
+def solve(A: jax.Array, b: jax.Array) -> jax.Array:
+    """Solve Ax = b using LU decomposition."""
+    L, U = doolittle(A)
+    y = jax.lax.linalg.triangular_solve(
+        L, b, left_side=True, lower=True, unit_diagonal=True
+    )
+    return jax.lax.linalg.triangular_solve(U, y, left_side=True, lower=False)
+
+
+def _householder(a, eps=1e-6):
+    alpha = a[0]
+    s = jnp.sum(a[1:] ** 2)
+    cond = s < eps
+
+    def if_not_cond(v):
+        t = (alpha**2 + s) ** 0.5
+        v0 = jax.lax.cond(alpha <= 0, lambda: alpha - t, lambda: -s / (alpha + t))
+        tau = 2 * v0**2 / (s + v0**2)
+        v = v / v0
+        v = v.at[0].set(1.0)
+        return v, tau
+
+    return jax.lax.cond(cond, lambda v: (v, 0.0), if_not_cond, a)
+
+
+def qr(A):
+    m, n = A.shape
+    min_ = min(m, n)
+
+    Q = jnp.eye(m, n, dtype=A.dtype)
+    for j in range(min_):
+        v, tau = _householder(A[j:, j])
+
+        H = jnp.eye(m)
+        H = H.at[j:, j:].add(-tau * (v[:, None] @ v[None, :]))
+        A = H @ A
+        Q = H @ Q
+
+    return Q[:n].T, jnp.triu(A[:n])
+
+
 def _update_precond_UVd_math(
     key, U, V, d, v, h, precond_lr, step_normalizer, precision
 ):
@@ -639,19 +699,28 @@ def _update_precond_UVd_math(
         I = jnp.eye(VtU.shape[0], dtype=VtU.dtype)
         IpVtU = I + VtU
         invQtv = v / d
-        # TODO (evanatyourservice): replace lu with schur + triangular solve?
-        solve_U = jnp.linalg.solve(
-            otu.tree_cast(IpVtU.T, jnp.float32),
-            otu.tree_cast(U.T @ invQtv, jnp.float32),
-        )
-        solve_U = otu.tree_cast(solve_U, invQtv.dtype)
-        invQtv = invQtv - V @ solve_U
-        solve_V = jnp.linalg.solve(
-            otu.tree_cast(IpVtU, jnp.float32), otu.tree_cast(V.T @ invQtv, jnp.float32)
-        )
-        solve_V = otu.tree_cast(solve_V, invQtv.dtype)
-        invPv = invQtv - U @ solve_V
+
+        """
+        # lu decomposition
+        invQtv = invQtv - V @ solve(IpVtU.T, U.T @ invQtv)
+        invPv = invQtv - U @ solve(IpVtU, V.T @ invQtv)
         invPv = invPv / d
+        """
+        # qr decomposition, better result
+        # slower but worth it for small matrices (low rank)
+        q, r = qr(IpVtU.T)
+        # tril(R) leaves only diag of R nonzero for triangular solve
+        # diag of R relates to singular values of A
+        # det A = det R = prod of diag R = prod of eigenvalues of A
+        # performs better but not sure why yet
+        # LU solves several XOR problems in on avg 6963 steps, QR in 5088,
+        # and QR tril(R) in 4725
+        # set to True to use tril(R) instead of R
+        tril_r = False
+        invQtv = invQtv - V @ _solve_triangular(
+            r, q.T @ (U.T @ invQtv), upper=not tril_r
+        )
+        invPv = invQtv - U @ (q @ _solve_triangular(r.T, V.T @ invQtv, upper=tril_r))
 
         nablaD = Ph * h - v * invPv
         if step_normalizer == "2nd":
@@ -801,11 +870,6 @@ def _triu01(A):
     return jnp.triu(A, 0) + jnp.triu(A, 1)
 
 
-def _solve_triangular(a, b, upper, left=True):
-    """jax.lax.linalg.triangular_solve rewritten to match PyTorch convention."""
-    return jax.lax.linalg.triangular_solve(a, b, left_side=left, lower=not upper)
-
-
 def _shape_as_matrix(x: jax.Array) -> tuple:
     """Reshapes tensor x to a matrix with conditions to improve efficiency.
 
@@ -885,12 +949,12 @@ def _initQ(shape, max_size, max_skew, dtype=jnp.float32):
     """
     assert len(shape) == 2, "preconditioned param shape must be 2D"
     s1, s2 = shape
-    if s1 > max_size or s1 > max_skew * s2:
+    if s1 < 2 or s1 > max_size or s1 > max_skew * s2:
         Q1 = jnp.ones(s1, dtype=dtype)
     else:
         Q1 = jnp.eye(s1, dtype=dtype)
 
-    if s2 > max_size or s2 > max_skew * s1:
+    if s2 < 2 or s2 > max_size or s2 > max_skew * s1:
         Q2 = jnp.ones(s2, dtype=dtype)
     else:
         Q2 = jnp.eye(s2, dtype=dtype)
