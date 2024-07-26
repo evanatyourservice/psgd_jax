@@ -700,29 +700,17 @@ def _update_precond_UVd_math(
         IpVtU = I + VtU
         invQtv = v / d
 
-        """
-        # lu decomposition
+        # LU decomposition
         invQtv = invQtv - V @ solve(IpVtU.T, U.T @ invQtv)
         invPv = invQtv - U @ solve(IpVtU, V.T @ invQtv)
+
+        # QR decomposition, slower
+        # q, r = qr(IpVtU.T)
+        # invQtv = invQtv - V @ _solve_triangular(r, q.T @ (U.T @ invQtv), upper=True)
+        # invPv = invQtv - U @ (q @ _solve_triangular(r.T, V.T @ invQtv, upper=False))
+
         invPv = invPv / d
-        """
-        # qr decomposition, better result
-        # slower but worth it for small matrices (low rank)
-        q, r = qr(IpVtU.T)
-        # tril(R) leaves only diag of R nonzero for triangular solve
-        # diag of R relates to singular values of A
-        # det A = det R = prod of diag R = prod of eigenvalues of A
-        # performs better but not sure why yet
-        # LU solves several XOR problems in on avg 6963 steps, QR in 5088,
-        # and QR tril(R) in 4725
-        # set to True to use tril(R) instead of R
-        tril_r = False
-        invQtv = invQtv - V @ _solve_triangular(
-            r, q.T @ (U.T @ invQtv), upper=not tril_r
-        )
-        invPv = invQtv - U @ (q @ _solve_triangular(r.T, V.T @ invQtv, upper=tril_r))
-        invPv = invPv / d
-        
+
         nablaD = Ph * h - v * invPv
         if step_normalizer == "2nd":
             mu = precond_lr * jnp.min(

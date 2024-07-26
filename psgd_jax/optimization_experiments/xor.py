@@ -16,6 +16,8 @@ from psgd_jax.image_classification.network_utils import normal_init
 from psgd_jax.image_classification.models.ViT import LearnablePositionalEncoding
 
 
+# os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
+
 wandb.require("core")
 jax.config.update("jax_default_matmul_precision", jax.lax.Precision.HIGH)
 
@@ -108,7 +110,7 @@ def main(
     log_to_wandb: bool = True,
     wandb_entity: str = "",
     seed: int = 5,
-    criteria_threshold: float = 0.05,
+    criteria_threshold: float = 0.1,
     total_steps: int = 100000,
     batch_size: int = 128,
     seq_len: int = 32,
@@ -117,6 +119,7 @@ def main(
     n_layers: int = 1,
     n_heads: int = 2,
     ff_dim: int = 32,
+    l2_reg: float = 1e-4,
     group_n_train_steps: int = 100,
     learning_rate: float = 0.01,
     min_learning_rate: float = 0.0,
@@ -162,6 +165,7 @@ def main(
         n_layers: int, number of layers for the transformer model.
         n_heads: int, number of heads for the transformer model.
         ff_dim: int, feed-forward dimension for the transformer model.
+        l2_reg: float, L2 regularization, psgd style with random strength per param.
         group_n_train_steps: int, number of training steps to group within jit.
         learning_rate: float, learning rate for the optimizer.
         min_learning_rate: float, minimum learning rate for the optimizer.
@@ -315,8 +319,21 @@ def main(
 
     def train_loss(params, key, xy_pair):  # logistic loss
         """Compute the loss for training."""
-        pred = model.apply({"params": params}, xy_pair[0], rngs={"params": key})
-        return -jnp.mean(jnp.log(jax.nn.sigmoid(xy_pair[1] * pred)))
+        key1, key2 = jax.random.split(key)
+        pred = model.apply({"params": params}, xy_pair[0], rngs={"params": key1})
+        loss = -jnp.mean(jnp.log(jax.nn.sigmoid(xy_pair[1] * pred)))
+
+        if l2_reg > 0:
+            # randomized l2 regularization psgd style
+            flat_params, _ = jax.tree.flatten(params)
+            rngs = jax.random.split(key2, len(flat_params))
+            noisy_params = [
+                p * jax.random.uniform(k, p.shape, p.dtype)
+                for p, k in zip(flat_params, rngs)
+            ]
+            loss += l2_reg * optax.global_norm(noisy_params)
+
+        return loss
 
     def train_step(params, opt_state, key):
         """Train for one step."""
@@ -415,7 +432,7 @@ if __name__ == "__main__":
         log_to_wandb=True,
         wandb_entity="",
         seed=5,
-        criteria_threshold=0.05,
+        criteria_threshold=0.1,
         total_steps=100_000,
         batch_size=128,
         seq_len=50,
@@ -424,6 +441,7 @@ if __name__ == "__main__":
         n_layers=1,
         n_heads=2,
         ff_dim=32,
+        l2_reg=1e-4,
         group_n_train_steps=100,
         learning_rate=0.01,
         min_learning_rate=0.0,
@@ -438,7 +456,7 @@ if __name__ == "__main__":
         beta2=0.999,
         epsilon=1e-8,
         nesterov=False,
-        weight_decay=1e-6,
+        weight_decay=0.0,
         gradient_clip=1.0,
         graft=False,
         precondition_every_n=10,
