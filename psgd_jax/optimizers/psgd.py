@@ -721,7 +721,8 @@ def _update_precond_UVd_math(
             r, q.T @ (U.T @ invQtv), upper=not tril_r
         )
         invPv = invQtv - U @ (q @ _solve_triangular(r.T, V.T @ invQtv, upper=tril_r))
-
+        invPv = invPv / d
+        
         nablaD = Ph * h - v * invPv
         if step_normalizer == "2nd":
             mu = precond_lr * jnp.min(
