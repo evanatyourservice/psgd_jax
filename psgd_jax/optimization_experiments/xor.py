@@ -325,13 +325,8 @@ def main(
 
         if l2_reg > 0:
             # randomized l2 regularization psgd style
-            flat_params, _ = jax.tree.flatten(params)
-            rngs = jax.random.split(key2, len(flat_params))
-            noisy_params = [
-                p * jax.random.uniform(k, p.shape, p.dtype)
-                for p, k in zip(flat_params, rngs)
-            ]
-            loss += l2_reg * optax.global_norm(noisy_params)
+            rand = jax.random.uniform(key2)
+            loss += rand * l2_reg * optax.global_norm(params) ** 2
 
         return loss
 
