@@ -184,7 +184,7 @@ parser.add_argument(
         "and scales the entire gradient to have unit norm i.e. grad/||grad||_2."
     ),
 )
-parser.add_argument("--beta1", type=float, default=0.0)
+parser.add_argument("--beta1", type=float, default=0.9)
 parser.add_argument("--beta2", type=float, default=0.999)
 parser.add_argument("--epsilon", type=float, default=1e-8)
 parser.add_argument(
