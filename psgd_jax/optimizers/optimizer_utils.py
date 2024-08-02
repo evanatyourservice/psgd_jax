@@ -1,14 +1,21 @@
 import jax
+import optax
 from jax import numpy as jnp, vmap
 import flax
 from optax._src import base
 
 
-def hvp(obj_fn, model, vector):
-    return jax.jvp(jax.grad(obj_fn), (model,), (vector,))[1]
+def norm_grads(layerwise: bool = False) -> base.GradientTransformation:
+    """Gradient transformation that normalizes gradients to unit norm.
 
+    Args:
+        layerwise (bool): Whether to normalize gradients layer-wise, otherwise
+            the gradients are normalized globally.
 
-def norm_grad_layerwise() -> base.GradientTransformation:
+    Returns:
+        base.GradientTransformation: The gradient transformation
+    """
+
     def init_fn(params):
         del params
         return base.EmptyState()
@@ -16,17 +23,43 @@ def norm_grad_layerwise() -> base.GradientTransformation:
     def update_fn(updates, state, params):
         del params
 
-        def update_fn(g):
-            norm = jnp.linalg.norm(g)
-            norm = jnp.where(norm == 0, 1, norm)
-            return g / norm
+        if layerwise:
 
-        g_regular = flax.traverse_util.ModelParamTraversal(
-            lambda path, param: "scan" not in path
-        ).update(update_fn, updates)
-        updates = flax.traverse_util.ModelParamTraversal(
-            lambda path, param: "scan" in path
-        ).update(vmap(update_fn), g_regular)
+            def update_fn(g):
+                norm = jnp.linalg.norm(g)
+                norm = jnp.where(norm == 0, 1, norm)
+                return g / norm
+
+            g_regular = flax.traverse_util.ModelParamTraversal(
+                lambda path, param: "scan" not in path
+            ).update(update_fn, updates)
+            updates = flax.traverse_util.ModelParamTraversal(
+                lambda path, param: "scan" in path
+            ).update(vmap(update_fn), g_regular)
+        else:
+            global_norm = optax.global_norm(updates)
+            global_norm = jnp.where(global_norm == 0, 1, global_norm)
+            updates = jax.tree.map(lambda g: g / global_norm, updates)
+
         return updates, state
 
     return base.GradientTransformation(init_fn, update_fn)
+
+
+def split_scanned_params(params):
+    """Splits scanned layers into separate layers for flax models.
+
+    Looks for layers with "scan" in the path and splits them into a dict
+    where the key is the index of the layer, e.g.
+    `{"kernel": [-0.1, 0.0, 0.1]} -> {"kernel": {"0": -0.1, "1": 0.0, "2": 0.1}}`
+    """
+    return flax.traverse_util.ModelParamTraversal(
+        lambda path, param: "scan" in path
+    ).update(lambda scanned: {f"{i}": p for i, p in enumerate(scanned)}, params)
+
+
+def merge_scanned_params(params, goal_structure: jax.tree_util.PyTreeDef):
+    """Merges separated scanned layers back into a single layer."""
+    params = goal_structure.flatten_up_to(params)
+    params = [jnp.stack(list(l.values())) if isinstance(l, dict) else l for l in params]
+    return jax.tree.unflatten(goal_structure, params)

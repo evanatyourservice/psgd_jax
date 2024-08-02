@@ -15,7 +15,6 @@ Available optimizers from psgd_jax/optimizers/create_optimizer.py:
 - PSGD
 - shampoo
 - CASPR
-- sophia
 - lion
 - adam
 - adamw
