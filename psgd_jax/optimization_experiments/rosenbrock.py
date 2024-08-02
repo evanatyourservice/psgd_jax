@@ -219,7 +219,7 @@ if __name__ == "__main__":
         psgd_rank=10,
         psgd_heavyball=False,
         psgd_feed_into_adam=True,
-        psgd_precond_lr=0.3,
+        psgd_precond_lr=0.1,
         psgd_precond_init_scale=None,
     )
     plot = partial(plot_rosenbrock, seed=np.random.randint(0, 2**30))
@@ -233,7 +233,7 @@ if __name__ == "__main__":
         psgd_update_probability=1.0,
     )
 
-    opt = fn(optimizer="shampoo", learning_rate=0.02, graft=True)[0]
+    opt = fn(optimizer="shampoo", learning_rate=0.1, graft=True)[0]
     plot(optimizer=opt, steps=steps, plot_title="Shampoo")
 
     opt = fn(optimizer="adam", learning_rate=0.3)[0]

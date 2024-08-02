@@ -159,6 +159,13 @@ def create_optimizer(
         chain = [optax.scale_by_lion(b1=beta1, b2=beta2, mu_dtype=mu_dtype)]
     elif optimizer in ["shampoo", "caspr"]:
         # skip norm and clip for shampoo
+        if graft:
+            if norm_grads is not None:
+                graft_type = GraftingType.RMSPROP_NORMALIZED
+            else:
+                graft_type = GraftingType.RMSPROP
+        else:
+            graft_type = GraftingType.SGD
         chain = [
             distributed_shampoo(
                 learning_rate=learning_rate_in,
@@ -171,9 +178,7 @@ def create_optimizer(
                 nesterov=nesterov,
                 batch_axis_name=pmap_axis_name,
                 clip_by_scaled_gradient_norm=gradient_clip,
-                graft_type=(
-                    GraftingType.RMSPROP_NORMALIZED if graft else GraftingType.SGD
-                ),
+                graft_type=graft_type,
             )
         ]
     elif optimizer == "psgd":
