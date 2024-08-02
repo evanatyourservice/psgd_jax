@@ -73,7 +73,7 @@ Add your wandb key to environment variables if you want to log results to wandb:
 export WANDB_API_KEY=<your_key>
 ```
 
-Try the image classification example (set the --wandb_entity flag to your wandb username to log results):
+Try the image classification example with PSGD (set the --wandb_entity flag to your wandb username to log results):
 ```bash
 cd psgd_jax/psgd_jax/image_classification && python3 train.py --dataset cifar10 --model resnet18 --optimizer psgd --psgd_precond_type xmat
 ```
@@ -84,16 +84,18 @@ cd psgd_jax/psgd_jax/image_classification && python3 train.py --dataset cifar10 
 The goals of this project include implementing PSGD and its variants in JAX, and also to provide a scalable 
 distributed framework with which to test optimizers on larger-scale problems to help further optimization research.
 
-- [x] jax.pmap psgd version
+- [x] port PSGD to JAX
 - [x] simple image classification training
 - [x] Add other optimizers for comparisons
 - [x] Add XOR experiment
+- [x] Add rosenbrock plotting
+- [ ] Convert image classification training to use jax sharding
 - [ ] Add larger vision and LLM experiments
-- [ ] Add other PSGD features from torch version
-- [ ] Create distributed version of PSGD for jax.jit sharding
+- [ ] Test sharding setups for PSGD, possibly rework preconditioner shapes to be more efficient
 - [ ] Add MLCommons algorithmic efficiency benchmarks (https://github.com/mlcommons/algorithmic-efficiency)
-- [ ] Allow passing custom optimizers into experiments for easier experimentation
 
+Misc:
+- [ ] Pull create_optimizer fn out of experiments to allow user to define optimizer more easily
 
 ## Resources
 
