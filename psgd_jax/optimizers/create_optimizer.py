@@ -13,9 +13,8 @@ from psgd_jax.optimizers.first_order_optimizers import (
     scale_by_adam,
     scale_by_sign_sgd,
 )
-from psgd_jax.optimizers.sophia import scale_by_sophia_h
 from psgd_jax.optimizers.psgd import scale_by_psgd
-from psgd_jax.optimizers.optimizer_utils import norm_grad_layerwise
+from psgd_jax.optimizers.optimizer_utils import norm_grads as norm_grads_transformation
 
 
 # only lets through kernel weights for weight decay
@@ -32,7 +31,7 @@ def create_optimizer(
     optimizer: str,
     learning_rate: float,
     min_learning_rate: float,
-    norm_grads_layerwise: bool,
+    norm_grads: Optional[str],
     beta1: float,
     beta2: float,
     epsilon: float,
@@ -45,27 +44,33 @@ def create_optimizer(
     gradient_clip: Optional[float],
     pmap_axis_name: Optional[str],
     graft: bool,
-    precondition_every_n: int,
-    precond_block_size: int,
-    sophia_gamma: float,
+    shampoo_precond_every_n: int,
+    shampoo_precond_block_size: int,
     psgd_precond_type: str,
-    psgd_feed_into_adam: bool,
-    psgd_heavyball: bool,
-    psgd_rank: int,
     psgd_update_prob: float,
+    psgd_rank: int,
+    psgd_heavyball: bool,
+    psgd_feed_into_adam: bool,
     psgd_precond_lr: float,
     psgd_precond_init_scale: Optional[float],
-    psgd_whitening: bool,
     cooldown_steps: int = 10000,
-    timescale: int = 10000,
+    rsqrt_timescale: int = 10000,
     exp_decay_rate: float = 0.1,
     mu_dtype: Union[jnp.dtype, str] = jnp.float32,
-) -> Tuple[optax.GradientTransformation, Callable[[int], float]]:
-    if warmup_steps < 0:
-        raise ValueError("Warmup steps must be non-negative.")
+) -> Tuple[optax.GradientTransformationExtraArgs, Callable[[int], float]]:
+    if norm_grads is not None and gradient_clip is not None:
+        print(
+            "WARNING: both norm_grads and gradient_clip are set. "
+            "Only norm_grads will be applied."
+        )
+        gradient_clip = None
+    warmup_steps = max(0, warmup_steps)
+    # schedule-free momentum adjusting
     sf_b1 = beta1
     if schedule_free:
-        lr_schedule = "linear_warmup"
+        if lr_schedule != "flat_w_warmup":
+            print("WARNING: changing lr schedule to flat_w_warmup for schedule-free.")
+            lr_schedule = "flat_w_warmup"
         beta1 = 0.0
 
     # learning rate schedule
@@ -76,18 +81,20 @@ def create_optimizer(
         warmup_steps,
         total_train_steps,
         cooldown_steps,
-        timescale,
+        rsqrt_timescale,
         exp_decay_rate,
     )
 
     # norm grads
-    if norm_grads_layerwise:
-        chain = [norm_grad_layerwise()]
+    if norm_grads is not None:
+        chain = [
+            norm_grads_transformation(layerwise=norm_grads in ["layer", "layerwise"])
+        ]
     else:
         chain = []
 
     # gradient clipping
-    if gradient_clip:
+    if gradient_clip is not None:
         if gradient_clip > 0.0:
             chain += [optax.clip_by_global_norm(gradient_clip)]
 
@@ -150,30 +157,17 @@ def create_optimizer(
     elif optimizer == "lion":
         # skip norm and clip for lion
         chain = [optax.scale_by_lion(b1=beta1, b2=beta2, mu_dtype=mu_dtype)]
-    elif optimizer == "sophia":
-        # skip norm and clip for sophia
-        chain = [
-            scale_by_sophia_h(
-                b1=sf_b1,  # sophia fails without momentum
-                b2=beta2,
-                eps=epsilon,
-                gamma=sophia_gamma,
-                update_interval=precondition_every_n,
-                mu_dtype=mu_dtype,
-                pmap_axis_name=pmap_axis_name,
-            )
-        ]
     elif optimizer in ["shampoo", "caspr"]:
         # skip norm and clip for shampoo
         chain = [
             distributed_shampoo(
                 learning_rate=learning_rate_in,
                 caspr_variant=optimizer == "caspr",
-                block_size=precond_block_size,
+                block_size=shampoo_precond_block_size,
                 beta1=beta1,
                 beta2=beta2,
                 weight_decay=weight_decay,
-                preconditioning_compute_steps=precondition_every_n,
+                preconditioning_compute_steps=shampoo_precond_every_n,
                 nesterov=nesterov,
                 batch_axis_name=pmap_axis_name,
                 clip_by_scaled_gradient_norm=gradient_clip,
@@ -187,21 +181,19 @@ def create_optimizer(
         chain = [
             scale_by_psgd(
                 preconditioner_type=psgd_precond_type,
+                preconditioner_update_probability=psgd_update_prob,
                 b1=beta1,
                 heavyball=psgd_heavyball,
                 nesterov=nesterov,
                 gradient_clip=gradient_clip,
-                rank_of_approximation=psgd_rank,
-                update_probability=psgd_update_prob,
+                uvd_rank_of_approximation=psgd_rank,
                 precond_lr=psgd_precond_lr,
                 precond_init_scale=psgd_precond_init_scale,
-                use_whitening_preconditioner=psgd_whitening,
                 feed_into_adam=psgd_feed_into_adam,
                 graft_adam_lr=graft,
                 adam_b2=beta2,
-                adam_norm_grads_layerwise=norm_grads_layerwise,
+                adam_norm_grads=norm_grads,
                 mu_dtype=mu_dtype,
-                pmap_axis_name=pmap_axis_name,
             )
         ]
     else:
@@ -235,7 +227,7 @@ def make_schedule(
     warmup_steps: int,
     total_train_steps: int,
     cooldown_steps: int = 10000,
-    timescale: int = 10000,
+    rsqrt_timescale: int = 10000,
     exp_decay_rate: float = 0.1,
 ) -> Callable[[int], float]:
     if lr_schedule == "cosine":
@@ -261,7 +253,7 @@ def make_schedule(
         schedule = optax.join_schedules(
             schedules=[warmup_fn, decay_fn], boundaries=[warmup_steps]
         )
-    elif lr_schedule == "linear_warmup":
+    elif lr_schedule == "flat_w_warmup":
         warmup_fn = optax.linear_schedule(
             init_value=min_learning_rate,
             end_value=learning_rate,
@@ -290,7 +282,11 @@ def make_schedule(
         if cooldown_steps == 0:
             print("WARNING: cooldown_steps is 0 but rsqrt schedule is used")
         schedule = rsqrt_lr_schedule(
-            learning_rate, total_train_steps, warmup_steps, cooldown_steps, timescale
+            learning_rate,
+            total_train_steps,
+            warmup_steps,
+            cooldown_steps,
+            rsqrt_timescale,
         )
     elif lr_schedule in ["trapezoid", "trapezoidal"]:
         # from https://arxiv.org/abs/2405.18392
@@ -338,21 +334,3 @@ def one_minus_sqrt_schedule(learning_rate: float, transition_steps: int):
         return jnp.clip(lr, min=0.0)
 
     return step_fn
-
-
-if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-
-    total_steps = 100_000
-    warmup_steps = 10_000
-    cooldown_steps = 10_000
-    learning_rate = 1.0
-    schedule = make_schedule(
-        "trapezoidal", learning_rate, 0.0, warmup_steps, total_steps, cooldown_steps
-    )
-    steps = jnp.arange(total_steps)
-    lrs = schedule(steps)
-    plt.plot(steps, lrs)
-    plt.xlabel("Step")
-    plt.ylabel("Learning Rate")
-    plt.show()

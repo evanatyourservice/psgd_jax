@@ -36,6 +36,7 @@ from psgd_jax.image_classification.models.ViT import Transformer
 from psgd_jax.image_classification.models.resnet import ResNetTiny, ResNet18, ResNet50
 from psgd_jax.image_classification.tf_preprocessing_tools import CifarPreprocess
 from psgd_jax.optimizers.create_optimizer import create_optimizer
+from psgd_jax.optimizers.psgd import psgd_hvp_helper
 from psgd_jax.image_classification.training_utils import (
     to_full,
     to_half,
@@ -70,11 +71,12 @@ parser.add_argument(
 parser.add_argument("--batch_size", type=int, default=256)
 parser.add_argument("--n_epochs", type=int, default=200)
 parser.add_argument("--bfloat16", type=str2bool, default=False)
+parser.add_argument("--l2_regularization", type=float, default=1e-6)
 parser.add_argument(
-    "--l2_regularization",
-    type=float,
-    default=0.0,
-    help="Psgd-style with random strength per param.",
+    "--randomize_l2_reg",
+    type=str2bool,
+    default=False,
+    help="random uniform * l2_reg (PSGD style).",
 )
 parser.add_argument(
     "--apply_z_loss",
@@ -84,17 +86,15 @@ parser.add_argument(
 )
 
 # Model
-"""
-ViT-Base 12 768 12
-ViT-Large 24 1024 16
-ViT-Huge 32 1280 16
-"""
 parser.add_argument(
     "--model_type",
     type=str,
     default="resnet18",
     choices=["resnettiny", "resnet18", "resnet50", "vit"],
 )
+"""ViT-Base 12 768 12
+ViT-Large 24 1024 16
+ViT-Huge 32 1280 16"""
 parser.add_argument("--n_layers", type=int, default=12, help="ViT only.")
 parser.add_argument("--enc_dim", type=int, default=768, help="ViT only.")
 parser.add_argument("--n_heads", type=int, default=12, help="ViT only.")
@@ -104,7 +104,7 @@ parser.add_argument(
     default=0,
     help="https://arxiv.org/abs/2309.16588, ViT only.",
 )
-parser.add_argument("--dropout_rate", type=float, default=0.05, help="ViT only.")
+parser.add_argument("--dropout_rate", type=float, default=0.0, help="ViT only.")
 
 # Learning rate
 parser.add_argument("--learning_rate", type=float, default=0.01)
@@ -113,11 +113,8 @@ parser.add_argument(
     "--lr_schedule",
     type=str,
     default="linear",
-    choices=["cosine", "linear", "linear_warmup", "rsqrt", "trapezoidal"],
-    help=(
-        "linear_warmup is a linear warmup followed by flat. trapezoidal uses "
-        "1-sqrt cooldown from https://arxiv.org/abs/2405.18392."
-    ),
+    choices=["cosine", "linear", "flat_w_warmup", "rsqrt", "trapezoidal"],
+    help="Trapezoidal uses 1-sqrt cooldown from https://arxiv.org/abs/2405.18392.",
 )
 parser.add_argument("--warmup_steps", type=int, default=512)
 parser.add_argument(
@@ -155,7 +152,6 @@ parser.add_argument(
         "novograd",
         "adam3",
         "lion",
-        "sophia",
         "shampoo",
         "caspr",
         "psgd",
@@ -163,26 +159,15 @@ parser.add_argument(
 )
 parser.add_argument(
     "--norm_grads",
-    type=str2bool,
-    default=False,
+    type=str,
+    default=None,
     help=(
         "Normalize the gradients to unit norm before optimizer either globally or "
-        "per layer."
+        "per layer (None for off). This is not applied before second-order optimizers, "
+        "only first-order optimizers and the grafting optimizers in second-order "
+        "optimizers."
     ),
-)
-parser.add_argument(
-    "--norm_grad_type",
-    type=str,
-    default="global",
-    choices=["global", "layer"],
-    help=(
-        "'global' or 'layer'. 'layer' scales gradient for each layer to have "
-        "unit norm i.e. layer/||layer||_2. 'layer' is applied before first-ord "
-        "optimizers, or before grafting optimizer in second-ord optimizers, but "
-        "never before second-ord optimizers directly because this negatively "
-        "affects the preconditioner. 'global' is applied before all optimizers, "
-        "and scales the entire gradient to have unit norm i.e. grad/||grad||_2."
-    ),
+    choices=[None, "global", "layer"],
 )
 parser.add_argument("--beta1", type=float, default=0.9)
 parser.add_argument("--beta2", type=float, default=0.999)
@@ -218,13 +203,15 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
-    "--precondition_every_n", type=int, default=32, help="For shampoo and sophia."
+    "--shampoo_precondition_every_n", type=int, default=32, help="Shampoo only."
 )
-parser.add_argument("--precond_block_size", type=int, default=128, help="Shampoo only.")
-parser.add_argument("--sophia_gamma", type=float, default=0.05)
+parser.add_argument(
+    "--shampoo_precond_block_size", type=int, default=128, help="Shampoo only."
+)
 parser.add_argument(
     "--psgd_precond_type", type=str, default="xmat", choices=["xmat", "uvd", "affine"]
 )
+parser.add_argument("--psgd_use_hessian", type=str2bool, default=True)
 parser.add_argument(
     "--psgd_feed_into_adam",
     type=str2bool,
@@ -241,7 +228,6 @@ parser.add_argument("--psgd_rank", type=int, default=4, help="For psgd LRA/UVd."
 parser.add_argument("--psgd_update_probability", type=float, default=0.1)
 parser.add_argument("--psgd_precond_lr", type=float, default=0.1)
 parser.add_argument("--psgd_precond_init_scale", type=float, default=None)
-parser.add_argument("--psgd_whitening", type=str2bool, default=False)
 parser.add_argument(
     "--mu_dtype",
     type=str,
@@ -275,6 +261,7 @@ def main(
     n_epochs: int,
     bfloat16: bool,
     l2_regularization: float,
+    randomize_l2_reg: bool,
     apply_z_loss: bool,
     model_type: str,
     n_layers: int,
@@ -289,8 +276,7 @@ def main(
     cooldown_steps: int,
     schedule_free: bool,
     optimizer: str,
-    norm_grads: bool,
-    norm_grad_type: str,
+    norm_grads: str,
     beta1: float,
     beta2: float,
     epsilon: float,
@@ -298,24 +284,19 @@ def main(
     weight_decay: float,
     gradient_clip: float,
     graft: bool,
-    precondition_every_n: int,
-    precond_block_size: int,
-    sophia_gamma: float,
+    shampoo_precondition_every_n: int,
+    shampoo_precond_block_size: int,
     psgd_precond_type: str,
+    psgd_use_hessian: bool,
     psgd_feed_into_adam: bool,
     psgd_heavyball: bool,
     psgd_rank: int,
     psgd_update_probability: float,
     psgd_precond_lr: float,
     psgd_precond_init_scale: Optional[float],
-    psgd_whitening: bool,
     mu_dtype: str,
 ):
     # TODO (evanatyourservice): allow for custom optimizer pass in
-    lr_schedule = "linear_warmup" if schedule_free else lr_schedule
-    if norm_grads and norm_grad_type == "global" and gradient_clip is not None:
-        gradient_clip = None
-        print("Global gradient normalization is on, turning off gradient clipping.")
 
     # take a look at the devices and see if we're on CPU, GPU, or TPU
     devices = jax.local_devices()
@@ -385,7 +366,6 @@ def main(
                 train=True,
                 platform=platform,
                 dtype=tf.float32,
-                image_size=224,
                 shuffle_buffer_size=250 if dataset == "imagenette" else 2000,
                 prefetch=4,
             )
@@ -395,7 +375,6 @@ def main(
                 train=False,
                 platform=platform,
                 dtype=tf.float32,
-                image_size=224,
                 shuffle_buffer_size=250 if dataset == "imagenette" else 2000,
                 prefetch=4,
             )
@@ -483,7 +462,7 @@ def main(
         optimizer=optimizer,
         learning_rate=learning_rate,
         min_learning_rate=min_learning_rate,
-        norm_grads_layerwise=norm_grads and norm_grad_type == "layer",
+        norm_grads=norm_grads,
         beta1=beta1,
         beta2=beta2,
         epsilon=epsilon,
@@ -496,17 +475,15 @@ def main(
         gradient_clip=gradient_clip,
         pmap_axis_name="batch",
         graft=graft,
-        precondition_every_n=precondition_every_n,
-        precond_block_size=precond_block_size,
-        sophia_gamma=sophia_gamma,
+        shampoo_precond_every_n=shampoo_precondition_every_n,
+        shampoo_precond_block_size=shampoo_precond_block_size,
         psgd_precond_type=psgd_precond_type,
-        psgd_feed_into_adam=psgd_feed_into_adam,
-        psgd_heavyball=psgd_heavyball,
-        psgd_rank=psgd_rank,
         psgd_update_prob=psgd_update_probability,
+        psgd_rank=psgd_rank,
+        psgd_heavyball=psgd_heavyball,
+        psgd_feed_into_adam=psgd_feed_into_adam,
         psgd_precond_lr=psgd_precond_lr,
         psgd_precond_init_scale=psgd_precond_init_scale,
-        psgd_whitening=psgd_whitening,
         cooldown_steps=cooldown_steps,
         mu_dtype=mu_dtype,
     )
@@ -589,50 +566,18 @@ def main(
 
         if l2_regularization > 0:
             # randomized l2 regularization psgd style
-            rng, subkey = jax.random.split(rng)
-            rand = jax.random.uniform(subkey)
-            loss += rand * l2_regularization * optax.global_norm(params) ** 2
+            if randomize_l2_reg:
+                rng, subkey = jax.random.split(rng)
+                multiplier = jax.random.uniform(subkey)
+            else:
+                multiplier = 1.0
+            loss += multiplier * l2_regularization * optax.global_norm(params) ** 2
 
         return loss.mean(), (new_model_state, logits)
-
-    def apply_model(rng, state, images, labels):
-        """Computes gradients, loss and accuracy for a single batch.
-
-        Args:
-            rng: PRNGKey, random number generator.
-            state: TrainState, current state.
-            images: jnp.ndarray, batch of images.
-            labels: jnp.ndarray, batch of labels.
-
-        Returns:
-            grads: jnp.ndarray, gradients.
-            loss: float, mean loss.
-            accuracy: float, mean accuracy.
-            new_model_state: dict, updated model state.
-        """
-        grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-        (loss, aux), grads = grad_fn(
-            state.params, state.batch_stats, rng, images, labels
-        )
-        new_model_state, logits = aux
-        accuracy = jnp.mean(jnp.argmax(logits, -1) == labels)
-        return grads, loss, accuracy, new_model_state
 
     @partial(pmap, axis_name="batch", donate_argnums=(1,))
     def train_step(rng, state, batch):
         """Applies an update to parameters and returns new state.
-
-        This function is jit-compiled and runs on multiple devices in parallel (pmap).
-        Therefore, each argument has a leading batch dim equal to number of
-        devices and is split across devices when passed to the function. Within the
-        function, they do not have this leading batch dim. When values
-        are returned from the function, they are recombined and again have the leading
-        batch dim of size number of devices.
-
-        For example, with 8 devices, a batched image input would have shape
-        [8, 128, 32, 32, 3] with a leading device dim, within the function it would
-        have shape [128, 32, 32, 3] without a leading device dim, and returned values
-        would again have a leading device dim of 8, [8, ...].
 
         Args:
             rng: PRNGKey, random number generator.
@@ -646,34 +591,45 @@ def main(
             accuracy: float, mean accuracy.
             grad_norm: float, mean gradient
         """
-        rng, rng2 = jax.random.split(rng)
-        grads, loss, accuracy, new_model_state = apply_model(
-            rng2, state, batch["image"], batch["label"]
-        )
-
-        # mean gradients across devices
-        grads = jax.lax.pmean(grads, axis_name="batch")
-
-        grad_norm = optax.global_norm(grads)
-        if norm_grads and norm_grad_type == "global":
-            # norm grads by global norm
-            grads = jax.tree.map(
-                lambda x: x / jnp.where(grad_norm == 0, 1, grad_norm), grads
+        rng, subkey = jax.random.split(rng)
+        if optimizer == "psgd" and psgd_use_hessian:
+            # use helper function to calc hvp and pass into psgd
+            loss_out, grads, hvp, vector, update_precond = psgd_hvp_helper(
+                subkey,
+                loss_fn,
+                state.params,
+                loss_fn_extra_args=(
+                    state.batch_stats,
+                    subkey,
+                    batch["image"],
+                    batch["label"],
+                ),
+                has_aux=True,
+                pmap_axis_name="batch",
+                preconditioner_update_probability=psgd_update_probability,
             )
 
-        if optimizer in ["sophia", "psgd"]:
-            # sophia, psgd need loss function to compute Hessian diagonal
-
-            def temp_loss_fn(params):
-                return loss_fn(
-                    params, state.batch_stats, rng2, batch["image"], batch["label"]
-                )[0]
+            loss, aux = loss_out
 
             updates, new_opt_state = tx.update(
-                grads, state.opt_state, state.params, obj_fn=temp_loss_fn
+                grads,
+                state.opt_state,
+                state.params,
+                Hvp=hvp,
+                vector=vector,
+                update_preconditioner=update_precond,
             )
         else:
+            (loss, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(
+                state.params, state.batch_stats, subkey, batch["image"], batch["label"]
+            )
+            # mean gradients across devices
+            grads = jax.lax.pmean(grads, axis_name="batch")
+
             updates, new_opt_state = tx.update(grads, state.opt_state, state.params)
+
+        new_model_state, logits = aux
+        accuracy = jnp.mean(jnp.argmax(logits, -1) == batch["label"])
 
         # apply updates to model params
         new_params = optax.apply_updates(state.params, updates)
@@ -689,6 +645,9 @@ def main(
         # mean stats across devices
         loss = jax.lax.pmean(loss, axis_name="batch")
         accuracy = jax.lax.pmean(accuracy, axis_name="batch")
+
+        # grad norm metric
+        grad_norm = optax.global_norm(grads)
 
         return rng, new_state, loss, accuracy, grad_norm
 
@@ -727,6 +686,7 @@ def main(
         image_size = 224 if dataset in ["imagenet", "imagenette"] else 32
         dummy_image = jnp.ones([1, image_size, image_size, 3])  # batch size 1 for init
         variables = model.init(rng, dummy_image, is_training=False)
+
         opt_state = tx.init(variables["params"])
 
         print("Network params:")
@@ -838,4 +798,25 @@ def main(
 
 
 if __name__ == "__main__":
-    main(**vars(parser.parse_args()))
+    args = vars(parser.parse_args())
+
+    tiny_test = False
+    if tiny_test:
+        args["n_epochs"] = 4
+        args["batch_size"] = 64
+        args["dataset"] = "cifar10"
+        args["model_type"] = "vit"
+        args["n_layers"] = 3
+        args["enc_dim"] = 32
+        args["n_heads"] = 2
+        args["optimizer"] = "psgd"
+        args["learning_rate"] = 0.003
+        args["lr_schedule"] = "linear"
+        args["warmup_steps"] = 100
+        args["weight_decay"] = 0.001
+        args["gradient_clip"] = 1.0
+        args["psgd_precond_type"] = "xmat"
+        args["psgd_use_hessian"] = True
+        args["psgd_feed_into_adam"] = True
+
+    main(**args)

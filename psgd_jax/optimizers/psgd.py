@@ -13,11 +13,87 @@ from optax._src.utils import canonicalize_dtype
 from optax._src.combine import chain
 
 from psgd_jax.optimizers.first_order_optimizers import scale_by_adam
-from psgd_jax.optimizers.optimizer_utils import hvp, norm_grad_layerwise
+from psgd_jax.optimizers.optimizer_utils import norm_grads
 
 
 def add_eps(x):
     return jnp.where(x == 0, jnp.finfo(x.dtype).tiny, x)
+
+
+def psgd_hvp_helper(
+    key: PRNGKey,
+    loss_fn: Callable,
+    params: base.Params,
+    loss_fn_extra_args: Tuple = (),
+    has_aux: bool = False,
+    pmap_axis_name: Optional[str] = None,
+    preconditioner_update_probability: float = 1.0,
+):
+    """Helper function for computing hessian vector product for PSGD.
+
+    This helps handle the calculation of a hessian vector product if wanting to use exact
+    hvp instead of the default gradient whitening style preconditioner. It returns the
+    loss fn output, gradients, hvp, vector, and a bool of whether we're updating the
+    preconditioner this step. The hvp, vector, and update cond are then passed into PSGD's
+    update fn. This fn is not needed if wanting to use the default gradient whitening style
+    preconditioner.
+
+    Args:
+        key: PRNGKey, random key.
+        loss_fn: callable, loss function.
+        params: flax.Params, model parameters.
+        loss_fn_extra_args: tuple, extra arguments for loss function to be used as
+            `loss_fn(params, *loss_fn_extra_args)`.
+        has_aux: bool, whether loss function has aux output.
+        pmap_axis_name: optional str, provide axis name if in pmap mode.
+        preconditioner_update_probability: float, probability of updating the preconditioner.
+
+    Returns:
+        loss_out: jnp.ndarray, output of loss function.
+        grads: flax.Params, gradients.
+        hvp: flax.Params, hessian vector product.
+        vector: flax.Params, random vector.
+        update_preconditioner: bool, whether we're updating preconditioner this step.
+    """
+    if pmap_axis_name is not None:
+        # make sure same key is used on all devices
+        key = jax.lax.all_gather(key, pmap_axis_name)[0]
+
+    key1, key2 = jax.random.split(key)
+
+    obj_fn = lambda params: loss_fn(params, *loss_fn_extra_args)
+
+    def grad_fn(params):
+        loss_out, grad = jax.value_and_grad(obj_fn, has_aux=has_aux)(params)
+        return grad, loss_out
+
+    def hvp_fn(params):
+        vector = otu.tree_random_like(key1, params, jax.random.normal)
+        grad, hvp, loss_out = jax.jvp(grad_fn, (params,), (vector,), has_aux=True)
+
+        if pmap_axis_name is not None:
+            grad = jax.lax.pmean(grad, axis_name=pmap_axis_name)
+            hvp = jax.lax.pmean(hvp, axis_name=pmap_axis_name)
+
+        return grad, loss_out, hvp, vector
+
+    # TODO (evanatyourservice): finite difference hvp option
+
+    def g_fn(params):
+        grad, loss_out = grad_fn(params)
+        dummy_hvp = jax.tree.map(jnp.zeros_like, params)
+        dummy_vector = jax.tree.map(jnp.zeros_like, params)
+
+        if pmap_axis_name is not None:
+            grad = jax.lax.pmean(grad, axis_name=pmap_axis_name)
+
+        return grad, loss_out, dummy_hvp, dummy_vector
+
+    update_precond = jax.random.uniform(key2) < preconditioner_update_probability
+
+    grad, loss_out, hvp, vector = jax.lax.cond(update_precond, hvp_fn, g_fn, params)
+
+    return loss_out, grad, hvp, vector, update_precond
 
 
 @struct.dataclass
@@ -36,60 +112,60 @@ class PSGDState:
 
 
 def scale_by_psgd(
-    preconditioner_type: str = "affine",
+    preconditioner_type: str = "xmat",
+    preconditioner_update_probability: float = 1.0,
     b1: float = 0.0,
     heavyball: bool = False,
     nesterov: bool = False,
     gradient_clip: Optional[float] = None,
-    rank_of_approximation: int = 4,
+    uvd_rank_of_approximation: int = 10,
     affine_max_size_triangular: int = 4096,
     affine_max_skew_triangular: int = 128,
-    update_probability: float = 1.0,
-    step_normalizer: str = "2nd",
+    affine_scanned_layers: Optional[Any] = None,  # TODO (evanatyourservice)
+    step_normalizer_order: str = "2nd",
     precond_lr: Union[float, Callable[[int], float]] = 0.1,
     precond_init_scale: Optional[float] = None,
-    use_whitening_preconditioner: bool = False,
-    seed: Optional[PRNGKey] = None,
     feed_into_adam: bool = False,
     graft_adam_lr: bool = False,
+    adam_b1: float = 0.9,
     adam_b2: float = 0.999,
-    adam_norm_grads_layerwise: bool = False,
+    adam_norm_grads: Optional[str] = None,
+    seed: Optional[PRNGKey] = None,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
-    precond_dtype: Optional[Union[str, jnp.dtype]] = None,  # TODO (evanatyourservice)
-    pmap_axis_name: Optional[str] = None,
     precision: str = "tensorfloat32",
 ) -> base.GradientTransformationExtraArgs:
     """
-    Implements UVd and XMat PSGD from https://arxiv.org/abs/2211.04422.
+    Implements UVd, XMat, and Affine PSGD from https://github.com/lixilinx/psgd_torch.
 
     Args:
         preconditioner_type: str, 'xmat', 'uvd', or 'affine'.
+        preconditioner_update_probability: float, probability of updating the
+            preconditioner.
         b1: float, momentum parameter.
         heavyball: bool, whether to use Heavyball momentum.
         nesterov: bool, whether to use Nesterov momentum.
         gradient_clip: optional float, global gradient norm clipping.
-        rank_of_approximation: int, rank of approximation for uvd preconditioner.
+        uvd_rank_of_approximation: int, rank of approximation for uvd preconditioner.
         affine_max_size_triangular: int, max size for affine preconditioner to be
             triangular.
         affine_max_skew_triangular: int, max skew for affine preconditioner to be
             triangular.
-        update_probability: float, probability of updating the preconditioner.
-        step_normalizer: str, '1st' or '2nd'.
+        affine_scanned_layers: optional Any, pytree same structure as params denoting
+            which layers should be vmapped over for affine preconditioner (set scanned
+            layers to True).
+        step_normalizer_order: str, '1st' or '2nd'.
         precond_lr: float or callable, learning rate for the preconditioner.
         precond_init_scale: optional float, initial scale for the preconditioner.
-        use_whitening_preconditioner: bool, whether to use whitening preconditioner,
-            otherwise use newton with hessian vector product.
-        seed: Optional PRNGKey, random seed.
         feed_into_adam: bool, whether to feed the preconditioned gradients into
             adam optimizer.
         graft_adam_lr: bool, whether to graft adam step size for updates.
+        adam_b1: float, beta1 parameter for the grafting optimizer.
         adam_b2: float, beta2 parameter for the grafting optimizer.
-        adam_norm_grads_layerwise: bool, whether to normalize gradients before
-            grafting optimizer.
+        adam_norm_grads: optional str, 'global', 'layer', or None. Whether to
+            normalize gradients to unit norm before grafting optimizer.
+        seed: Optional PRNGKey, random seed.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
             Defaults to the same dtype as the parameters.
-        precond_dtype: optional str or jnp.dtype, Unused.
-        pmap_axis_name: str, axis name for pmap.
         precision: str, precision for matmul, 'bfloat16', 'tensorfloat32', 'float32'.
 
     Returns:
@@ -107,20 +183,21 @@ def scale_by_psgd(
     if graft_adam_lr or feed_into_adam:
         print("PSGD: Using diagonal optimizer.")
         diag_opt = []
-        if adam_norm_grads_layerwise:
-            diag_opt += [norm_grad_layerwise()]
+        if adam_norm_grads is not None:
+            diag_opt += [
+                norm_grads(layerwise=adam_norm_grads in ["layer", "layerwise"])
+            ]
         if gradient_clip:
             diag_opt += [clipping.clip_by_global_norm(gradient_clip)]
         diag_opt += [
             scale_by_adam(
-                b1=b1, b2=adam_b2, eps=1e-8, mu_dtype=mu_dtype, nesterov=nesterov
+                b1=adam_b1, b2=adam_b2, eps=1e-8, mu_dtype=mu_dtype, nesterov=nesterov
             )
         ]
         diag_opt = chain(*diag_opt)
 
     def init_fn(params):
-        # TODO (evanatyourservice): add option for different keys per device in pmap
-        key = seed if seed else jax.random.PRNGKey(0)
+        key = seed if seed is not None else jax.random.PRNGKey(36)
 
         # preliminary
         n_params = sum([x.size for x in jax.tree.leaves(params)])
@@ -148,18 +225,17 @@ def scale_by_psgd(
         elif preconditioner_type == "uvd":
             key, subkey = jax.random.split(key)
             U = jax.random.normal(
-                subkey, (n_params, rank_of_approximation), dtype=jnp.float32
+                subkey, (n_params, uvd_rank_of_approximation), dtype=jnp.float32
             )
-            U /= (n_params * (rank_of_approximation + 10)) ** 0.5
+            U /= (n_params * (uvd_rank_of_approximation + 10)) ** 0.5
             key, subkey = jax.random.split(key)
             V = jax.random.normal(
-                subkey, (n_params, rank_of_approximation), dtype=jnp.float32
+                subkey, (n_params, uvd_rank_of_approximation), dtype=jnp.float32
             )
-            V /= (n_params * (rank_of_approximation + 10)) ** 0.5
+            V /= (n_params * (uvd_rank_of_approximation + 10)) ** 0.5
             d = jnp.ones((n_params, 1), jnp.float32)
             Qs = None
         elif preconditioner_type == "affine":
-            # TODO (evanatyourservice): ungroup scanned layers
             Qs = [
                 _initQ(
                     s[2],
@@ -186,12 +262,23 @@ def scale_by_psgd(
             V=V,
             d=d,
             Qs=Qs,
-            affine_reshapers=affine_reshapers,
             key=key,
             diag_opt_state=diag_state,
+            affine_reshapers=affine_reshapers,
         )
 
-    def update_fn(updates: base.Updates, state: PSGDState, params=None, obj_fn=None):
+    def update_fn(
+        updates: base.Updates,
+        state: PSGDState,
+        params: base.Params = None,
+        Hvp: Optional[base.Updates] = None,
+        vector: Optional[base.Updates] = None,
+        update_preconditioner: Optional[bool] = None,
+    ):
+        # use hessian preconditioning if hessian provided
+        # otherwise use gg^T whitening type preconditioning
+        hessian_based_preconditioning = Hvp is not None
+
         count_inc = safe_int32_increment(state.count)
         key = state.key
         grads = updates
@@ -210,74 +297,58 @@ def scale_by_psgd(
                 r[0](x) for x, r in zip(jax.tree.leaves(grads), state.affine_reshapers)
             ]
 
-        def _update_precond(key: PRNGKey, state: PSGDState):
+        def _update_precond(key: PRNGKey, state: PSGDState, Hvs, vs):
             if preconditioner_type == "xmat":
-                key, subkey = jax.random.split(key)
-                vs = otu.tree_random_like(
-                    subkey, params, partial(jax.random.rademacher, dtype=jnp.float32)
-                )
                 v = jnp.concatenate(
                     [jnp.reshape(x, goal_shape) for x in jax.tree.leaves(vs)], 0
                 )
-                if use_whitening_preconditioner:
-                    h = flat_grads
-                else:
-                    Hvs = hvp(obj_fn, params, vs)
-                    if pmap_axis_name:
-                        # mean hvps across pmap axis
-                        Hvs = jax.lax.pmean(Hvs, axis_name=pmap_axis_name)
+                if hessian_based_preconditioning:
                     h = jnp.concatenate(
                         [jnp.reshape(x, goal_shape) for x in jax.tree.leaves(Hvs)], 0
                     )
+                else:
+                    h = flat_grads
 
                 # init U
                 if precond_init_scale is not None:
                     init_scale = precond_init_scale
                 else:
-                    if use_whitening_preconditioner:
+                    if hessian_based_preconditioning:
+                        init_scale = (jnp.sum(v * v) / jnp.sum(h * h)) ** 0.25
+                    else:
                         init_scale = (
                             len(flat_grads) / jnp.sum(jnp.square(flat_grads))
                         ) ** 0.25
-                    else:
-                        init_scale = (jnp.sum(v * v) / jnp.sum(h * h)) ** 0.25
                 U = jax.lax.cond(
                     state.count == 0, lambda: state.U * init_scale, lambda: state.U
                 )
 
                 # update preconditioner
                 U, V = _update_precond_Xmat_math_(
-                    U, state.V, v, h, precond_lr_in, step_normalizer, precision
+                    U, state.V, v, h, precond_lr_in, step_normalizer_order, precision
                 )
                 d, Qs = None, None
             elif preconditioner_type == "uvd":
-                key, subkey = jax.random.split(key)
-                vs = otu.tree_random_like(
-                    subkey, params, partial(jax.random.rademacher, dtype=jnp.float32)
-                )
                 v = jnp.concatenate(
                     [jnp.reshape(x, goal_shape) for x in jax.tree.leaves(vs)], 0
                 )
-                if use_whitening_preconditioner:
-                    h = flat_grads
-                else:
-                    Hvs = hvp(obj_fn, params, vs)
-                    if pmap_axis_name:
-                        # mean hvps across pmap axis
-                        Hvs = jax.lax.pmean(Hvs, axis_name=pmap_axis_name)
+                if hessian_based_preconditioning:
                     h = jnp.concatenate(
                         [jnp.reshape(x, goal_shape) for x in jax.tree.leaves(Hvs)], 0
                     )
+                else:
+                    h = flat_grads
 
                 # init d
                 if precond_init_scale is not None:
                     init_scale = precond_init_scale
                 else:
-                    if use_whitening_preconditioner:
+                    if hessian_based_preconditioning:
+                        init_scale = (jnp.sum(v * v) / jnp.sum(h * h)) ** 0.25
+                    else:
                         init_scale = (
                             len(flat_grads) / jnp.sum(jnp.square(flat_grads))
                         ) ** 0.25
-                    else:
-                        init_scale = (jnp.sum(v * v) / jnp.sum(h * h)) ** 0.25
                 d = jax.lax.cond(
                     state.count == 0, lambda: state.d * init_scale, lambda: state.d
                 )
@@ -292,56 +363,12 @@ def scale_by_psgd(
                     v,
                     h,
                     precond_lr_in,
-                    step_normalizer,
+                    step_normalizer_order,
                     precision,
                 )
                 Qs = None
             else:  # affine
-                if use_whitening_preconditioner:
-                    Hvs = flat_grads
-
-                    # init Qs
-                    def init_q(g):
-                        if precond_init_scale is not None:
-                            return precond_init_scale
-                        else:
-                            return (g.size / jnp.sum(g * g.conj())) ** 0.25
-
-                    Qs = jax.lax.cond(
-                        state.count == 0,
-                        lambda: [
-                            [init_q(g) ** 0.5 * q for q in Qlr]
-                            for g, Qlr in zip(Hvs, state.Qs)
-                        ],
-                        lambda: state.Qs,
-                    )
-
-                    # update preconditioner
-                    key, subkey = jax.random.split(key)
-                    keys = jax.random.split(subkey, len(Qs))
-                    Qs = [
-                        _update_precond_affine_dropv_math(
-                            k,
-                            Qlr[0],
-                            Qlr[1],
-                            h,
-                            precond_lr_in,
-                            step_normalizer,
-                            precision,
-                        )
-                        for (k, Qlr, h) in zip(keys, Qs, jax.tree.leaves(Hvs))
-                    ]
-                else:
-                    key, subkey = jax.random.split(key)
-                    vs = otu.tree_random_like(
-                        subkey,
-                        params,
-                        partial(jax.random.rademacher, dtype=jnp.float32),
-                    )
-                    Hvs = hvp(obj_fn, params, vs)
-                    if pmap_axis_name:
-                        # mean hvps across pmap axis
-                        Hvs = jax.lax.pmean(Hvs, axis_name=pmap_axis_name)
+                if hessian_based_preconditioning:
                     # reshape vs and Hvs to matrices
                     vs = [
                         r[0](x)
@@ -381,30 +408,75 @@ def scale_by_psgd(
                             v,
                             h,
                             precond_lr_in,
-                            step_normalizer,
+                            step_normalizer_order,
                             precision,
                         )
                         for (k, Qlr, v, h) in zip(
                             keys, Qs, jax.tree.leaves(vs), jax.tree.leaves(Hvs)
                         )
                     ]
+                else:
+                    Hvs = flat_grads
+
+                    # init Qs
+                    def init_q(g):
+                        if precond_init_scale is not None:
+                            return precond_init_scale
+                        else:
+                            return (g.size / jnp.sum(g * g.conj())) ** 0.25
+
+                    Qs = jax.lax.cond(
+                        state.count == 0,
+                        lambda: [
+                            [init_q(g) ** 0.5 * q for q in Qlr]
+                            for g, Qlr in zip(Hvs, state.Qs)
+                        ],
+                        lambda: state.Qs,
+                    )
+
+                    # update preconditioner
+                    key, subkey = jax.random.split(key)
+                    keys = jax.random.split(subkey, len(Qs))
+                    Qs = [
+                        _update_precond_affine_dropv_math(
+                            k,
+                            Qlr[0],
+                            Qlr[1],
+                            h,
+                            precond_lr_in,
+                            step_normalizer_order,
+                            precision,
+                        )
+                        for (k, Qlr, h) in zip(keys, Qs, jax.tree.leaves(Hvs))
+                    ]
 
                 U, V, d = None, None, None
 
             return key, U, V, d, Qs
 
-        def _dont_update_precond(key, state):
+        def _dont_update_precond(key, state, Hvs, vs):
             return key, state.U, state.V, state.d, state.Qs
 
-        key, subkey = jax.random.split(key)
+        if not hessian_based_preconditioning:
+            # update cond and vector not passed in, create here
+            key, subkey = jax.random.split(key)
+            update_preconditioner = jnp.logical_or(
+                jax.random.uniform(subkey) < preconditioner_update_probability,
+                state.count == 0,
+            )
+            key, subkey = jax.random.split(key)
+            vector = otu.tree_random_like(
+                subkey, params, partial(jax.random.rademacher, dtype=jnp.float32)
+            )
+
         key, U, V, d, Qs = jax.lax.cond(
-            jnp.logical_or(
-                jax.random.uniform(subkey) < update_probability, state.count == 0
-            ),
+            update_preconditioner,
             _update_precond,
             _dont_update_precond,
             key,
             state,
+            Hvp,
+            vector,
         )
 
         updates = flat_grads
@@ -508,64 +580,60 @@ def scale_by_psgd(
 def psgd(
     learning_rate: Union[float, Callable[[int], float]] = 0.01,
     preconditioner_type: str = "xmat",
+    preconditioner_update_probability: float = 1.0,
     b1: float = 0.0,
     heavyball: bool = False,
     nesterov: bool = False,
     gradient_clip: Optional[float] = None,
     weight_decay: float = 0.0,
     mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
-    rank_of_approximation: int = 4,
+    uvd_rank_of_approximation: int = 10,
     affine_max_size_triangular: int = 4096,
     affine_max_skew_triangular: int = 128,
-    update_probability: float = 1.0,
-    step_normalizer: str = "2nd",
+    step_normalizer_order: str = "2nd",
     precond_lr: Union[float, Callable[[int], float]] = 0.1,
     precond_init_scale: Optional[float] = None,
-    use_whitening_preconditioner: bool = False,
-    seed: Optional[PRNGKey] = None,
     feed_into_adam: bool = False,
     graft_adam_lr: bool = False,
+    adam_b1: float = 0.9,
     adam_b2: float = 0.999,
-    adam_norm_grads_layerwise: bool = False,
+    adam_norm_grads: Optional[str] = None,
+    seed: Optional[PRNGKey] = None,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
-    precond_dtype: Optional[Union[str, jnp.dtype]] = None,
-    pmap_axis_name: Optional[str] = None,
     precision: str = "tensorfloat32",
 ) -> base.GradientTransformationExtraArgs:
     """
-    Implements UVd and XMat PSGD from https://arxiv.org/abs/2211.04422.
+    Implements UVd, XMat, and Affine PSGD from https://github.com/lixilinx/psgd_torch.
 
     Args:
         learning_rate: float or callable, learning rate for the optimizer.
         preconditioner_type: str, 'xmat', 'uvd', or 'affine'.
+        preconditioner_update_probability: float, probability of updating the
+            preconditioner.
         b1: float, momentum parameter.
         heavyball: bool, whether to use Heavyball momentum.
         nesterov: bool, whether to use Nesterov momentum.
         gradient_clip: optional float, global gradient norm clipping.
         weight_decay: float, weight decay.
         mask: optional mask for weight decay.
-        rank_of_approximation: int, rank of approximation for uvd preconditioner.
+        uvd_rank_of_approximation: int, rank of approximation for uvd preconditioner.
         affine_max_size_triangular: int, max size for affine preconditioner to be
             triangular.
         affine_max_skew_triangular: int, max skew for affine preconditioner to be
             triangular.
-        update_probability: float, probability of updating the preconditioner.
-        step_normalizer: str, '1st' or '2nd'.
+        step_normalizer_order: str, '1st' or '2nd'.
         precond_lr: float or callable, learning rate for the preconditioner.
         precond_init_scale: optional float, initial scale for the preconditioner.
-        use_whitening_preconditioner: bool, whether to use whitening preconditioner,
-            otherwise use newton with hessian vector product
-        seed: Optional PRNGKey, random seed.
         feed_into_adam: bool, whether to feed the preconditioned gradients into
             adam optimizer.
         graft_adam_lr: bool, whether to graft adam step size for updates.
+        adam_b1: float, beta1 parameter for the grafting optimizer.
         adam_b2: float, beta2 parameter for the grafting optimizer.
-        adam_norm_grads_layerwise: bool, whether to normalize gradients before
-            grafting optimizer.
+        adam_norm_grads: optional str, 'global', 'layer', or None. Whether to
+            normalize gradients to unit norm before grafting optimizer.
+        seed: Optional PRNGKey, random seed.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
             Defaults to the same dtype as the parameters.
-        precond_dtype: optional str or jnp.dtype, Unused.
-        pmap_axis_name: str, axis name for pmap.
         precision: str, precision for matmul, 'bfloat16', 'tensorfloat32', 'float32'.
 
     Returns:
@@ -574,26 +642,24 @@ def psgd(
     opt = [
         scale_by_psgd(
             preconditioner_type=preconditioner_type,
+            preconditioner_update_probability=preconditioner_update_probability,
             b1=b1,
             heavyball=heavyball,
             nesterov=nesterov,
             gradient_clip=gradient_clip,
-            rank_of_approximation=rank_of_approximation,
+            uvd_rank_of_approximation=uvd_rank_of_approximation,
             affine_max_size_triangular=affine_max_size_triangular,
             affine_max_skew_triangular=affine_max_skew_triangular,
-            update_probability=update_probability,
-            step_normalizer=step_normalizer,
+            step_normalizer_order=step_normalizer_order,
             precond_lr=precond_lr,
             precond_init_scale=precond_init_scale,
-            use_whitening_preconditioner=use_whitening_preconditioner,
-            seed=seed,
             feed_into_adam=feed_into_adam,
             graft_adam_lr=graft_adam_lr,
+            adam_b1=adam_b1,
             adam_b2=adam_b2,
-            adam_norm_grads_layerwise=adam_norm_grads_layerwise,
+            adam_norm_grads=adam_norm_grads,
+            seed=seed,
             mu_dtype=mu_dtype,
-            precond_dtype=precond_dtype,
-            pmap_axis_name=pmap_axis_name,
             precision=precision,
         )
     ]
@@ -606,11 +672,6 @@ def psgd(
 def _IpUVtmatvec(U, V, x):
     """Returns (I + U*V')*x. All variables are either matrices or column vectors."""
     return x + jnp.matmul(U, jnp.matmul(V.T, x))
-
-
-def _solve_triangular(a, b, upper, left=True):
-    """jax.lax.linalg.triangular_solve rewritten to match PyTorch convention."""
-    return jax.lax.linalg.triangular_solve(a, b, left_side=left, lower=not upper)
 
 
 def _update_precond_UVd_math(
@@ -645,9 +706,13 @@ def _update_precond_UVd_math(
         IpVtU = I + VtU
         invQtv = v / d
 
-        # LU decomposition
-        invQtv = invQtv - V @ jnp.linalg.solve(IpVtU.T, U.T @ invQtv)
-        invPv = invQtv - U @ jnp.linalg.solve(IpVtU, V.T @ invQtv)
+        orig_dtype = U.dtype
+        IpVtU = IpVtU.astype(jnp.float32)
+        U_solve = jnp.linalg.solve(IpVtU.T, (U.T @ invQtv).astype(jnp.float32))
+        invQtv = invQtv - V @ U_solve.astype(orig_dtype)
+        V_solve = jnp.linalg.solve(IpVtU, (V.T @ invQtv).astype(jnp.float32))
+        invPv = invQtv - U @ V_solve.astype(orig_dtype)
+        IpVtU = IpVtU.astype(orig_dtype)
         invPv = invPv / d
 
         nablaD = Ph * h - v * invPv
@@ -826,11 +891,11 @@ def _shape_as_matrix(x: jax.Array) -> tuple:
         else:
             for i in range(len(p0)):
                 for q in permutations(p0[:i] + p0[i + 1 :]):
-                    yield (p0[i], *q)
+                    yield p0[i], *q
 
     # here begins the processing
     if x.ndim == 2:  # t already is a matrix, do nothing
-        return (lambda u: u, lambda v: v, x.shape)
+        return lambda u: u, lambda v: v, x.shape
     elif x.ndim < 2:  # scalar or vector, simple reshape to matrix
         mtx_shape = (1, x.size)
         return (
@@ -888,6 +953,11 @@ def _initQ(shape, max_size, max_skew, dtype=jnp.float32):
         Q2 = jnp.eye(s2, dtype=dtype)
 
     return [Q1, Q2]
+
+
+def _solve_triangular(a, b, upper, left=True):
+    """jax.lax.linalg.triangular_solve rewritten to match PyTorch convention."""
+    return jax.lax.linalg.triangular_solve(a, b, left_side=left, lower=not upper)
 
 
 def _update_precond_affine_math_(
@@ -1046,6 +1116,7 @@ def _update_precond_affine_dropv_math(
 
             key, subkey = jax.random.split(key)
             Ql, Qr = balance(subkey, Ql, Qr)
+
         elif Ql.ndim == 1 and Qr.ndim == 2 and Ql.shape[0] >= Qr.shape[0]:
             # drop v when left is diagonal, right is dense, and gradient is a tall matrix
             A = (Ql[:, None] * dG) @ Qr.conj().T
@@ -1072,6 +1143,7 @@ def _update_precond_affine_dropv_math(
 
             key, subkey = jax.random.split(key)
             Ql, Qr = balance(subkey, Ql, Qr)
+
         elif Qr.ndim == 1 and Ql.ndim == 2 and Qr.shape[0] >= Ql.shape[0]:
             # drop v when right is diagonal, left is dense, and gradient is a short matrix
             A = Ql @ (dG * Qr.conj())
@@ -1098,6 +1170,7 @@ def _update_precond_affine_dropv_math(
 
             key, subkey = jax.random.split(key)
             Ql, Qr = balance(subkey, Ql, Qr)
+
         else:
             # keeping v as an auxiliary variable could save computations (tradeoff of performance, similar to Hutchinson’s trick) when
             #   1) gradient is a tall matrix, but left side is a dense preconditioner, right side is diagonal
@@ -1112,7 +1185,7 @@ def _update_precond_affine_dropv_math(
                 subkey, Ql, Qr, v, dG, precond_lr, step_normalizer, precision
             )
 
-        return Ql, Qr
+        return [Ql, Qr]
 
 
 def _precond_grad_affine_math(Ql, Qr, grad, precision):
@@ -1129,53 +1202,3 @@ def _precond_grad_affine_math(Ql, Qr, grad, precision):
             )
         else:  # Ql.ndim=1 and Qr.ndim=1:
             return (Ql * Ql.conj())[:, None] * grad * (Qr * Qr.conj())
-
-
-if __name__ == "__main__":
-    import warnings
-    import numpy as np
-    import optax
-
-    warnings.filterwarnings("ignore", category=DeprecationWarning)
-
-    def loss_fn(params, x, y):
-        w = params["w1"] + params["w2"]
-        return jnp.sum((jnp.dot(w.T, x) - y) ** 2)
-
-    print("Testing PSGD")
-    params = {
-        "w1": jnp.array(np.random.randn(20, 1)),
-        "w2": jnp.array(np.random.randn(20, 1)),
-    }
-    x = jnp.array(np.random.randn(20, 1))
-    y = jnp.array(np.random.randn(1))
-
-    steps = 200
-    lr = optax.linear_schedule(0.1, 0.0, steps)
-
-    opt = psgd(lr, "affine", use_whitening_preconditioner=True)
-    opt_state = opt.init(params)
-
-    def dummy_loss_fn(params):
-        return loss_fn(params, x, y)
-
-    initial_loss = loss_fn(params, x, y)
-    print(f"Initial loss = {initial_loss}")
-
-    def loop_body(i, state):
-        params, opt_state = state
-
-        loss, grads = jax.value_and_grad(loss_fn)(params, x, y)
-        # jax.debug.print("{}", loss)
-        updates, opt_state = opt.update(
-            grads, opt_state, params=params, obj_fn=dummy_loss_fn
-        )
-        params = optax.apply_updates(params, updates)
-        return params, opt_state
-
-    params, opt_state = jax.lax.fori_loop(0, steps, loop_body, (params, opt_state))
-
-    final_loss = loss_fn(params, x, y)
-    assert final_loss < 0.01 * initial_loss, f"Test failed. Final loss = {final_loss}"
-    print(f"Final loss = {final_loss}")
-    print("Test passed.")

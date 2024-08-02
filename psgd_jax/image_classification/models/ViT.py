@@ -36,7 +36,7 @@ class TransformerBlock(nn.Module):
 
         n_tokens, enc_dim = a.shape[-2:]
 
-        # https://arxiv.org/abs/2302.05442 style without parallel blocks
+        # https://arxiv.org/abs/2302.05442 style but without parallel blocks
         a2 = nn.LayerNorm(use_bias=False)(a)
         a2 = nn.SelfAttention(
             num_heads=self.n_heads,
@@ -96,16 +96,11 @@ class Transformer(nn.Module):
             )
             x = jnp.concatenate([x, empty_registers], axis=1)
 
-        """x = flax_scan(TransformerBlock, length=self.n_layers, unroll=2)(
+        x = flax_scan(TransformerBlock, length=self.n_layers, unroll=2)(
             n_heads=self.n_heads,
             dropout_rate=self.dropout_rate,
             is_training=is_training,
-        )(x)"""
-        for _ in range(self.n_layers):
-            # TODO (evanatyourservice): for loop until psgd handles scanned layers
-            x = TransformerBlock(n_heads=self.n_heads, dropout_rate=self.dropout_rate)(
-                x, is_training=is_training
-            )
+        )(x)
 
         x = nn.LayerNorm(use_bias=False)(x[:, 0])  # take cls token
 

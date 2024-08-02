@@ -596,7 +596,7 @@ def matrix_inverse_pth_root(
         total_retries = 0
     else:
         retry_loop_error_threshold = 0.05
-        num_tries = 1
+        num_tries = 2
         init_outer_state = tuple([0, identity, 1000.0, 100, 1.0, True])
 
         def _outer_iter_condition_fn(state):

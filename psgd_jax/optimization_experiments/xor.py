@@ -3,7 +3,6 @@ import time
 from functools import partial
 from pprint import pprint
 from typing import Optional
-
 import wandb
 
 import jax
@@ -14,6 +13,7 @@ import flax.linen as nn
 from psgd_jax.optimizers.create_optimizer import create_optimizer
 from psgd_jax.image_classification.network_utils import normal_init
 from psgd_jax.image_classification.models.ViT import LearnablePositionalEncoding
+from psgd_jax.optimizers.psgd import psgd_hvp_helper
 
 
 # os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
@@ -106,7 +106,7 @@ class Transformer(nn.Module):
         return nn.Dense(features=1, kernel_init=normal_init, use_bias=False)(x)
 
 
-def main(
+def run_xor_experiment(
     log_to_wandb: bool = True,
     wandb_entity: str = "",
     seed: int = 5,
@@ -119,7 +119,7 @@ def main(
     n_layers: int = 1,
     n_heads: int = 2,
     ff_dim: int = 32,
-    l2_reg: float = 1e-4,
+    l2_reg: float = 0.0,
     group_n_train_steps: int = 100,
     learning_rate: float = 0.01,
     min_learning_rate: float = 0.0,
@@ -128,8 +128,7 @@ def main(
     cooldown_steps: int = 0,
     schedule_free: bool = False,
     optimizer: str = "psgd",
-    norm_grads: bool = False,
-    norm_grad_type: str = "global",
+    norm_grads: str = None,
     beta1: float = 0.9,
     beta2: float = 0.999,
     epsilon: float = 1e-8,
@@ -137,17 +136,16 @@ def main(
     weight_decay: float = 0.0,
     gradient_clip: float = 1.0,
     graft: bool = False,
-    precondition_every_n: int = 10,
-    precond_block_size: int = 128,
-    sophia_gamma: float = 0.01,
+    shampoo_precondition_every_n: int = 10,
+    shampoo_precond_block_size: int = 128,
     psgd_precond_type: str = "uvd",
-    psgd_feed_into_adam: bool = False,
-    psgd_heavyball: bool = False,
-    psgd_rank: int = 10,
+    psgd_use_hessian: bool = False,
     psgd_update_probability: float = 1.0,
+    psgd_rank: int = 10,
+    psgd_heavyball: bool = False,
+    psgd_feed_into_adam: bool = False,
     psgd_precond_lr: float = 0.01,
     psgd_precond_init_scale: Optional[float] = None,
-    psgd_whitening: bool = False,
     mu_dtype: str = "float32",
 ):
     """Train a model on the XOR task.
@@ -174,11 +172,7 @@ def main(
         cooldown_steps: int, number of cooldown steps for the learning rate schedule.
         schedule_free: bool, whether to use a schedule-free optimizer.
         optimizer: str, optimizer to use.
-        norm_grads: bool, whether to normalize gradients.
-        norm_grad_type: str, type of gradient normalization, either "global" or "layer".
-            "layer" is not used before 2nd order optimizers because it can negatively
-            affect the preconditioner. It is used before first order optimizers and
-            grafting optimizers.
+        norm_grads: str, 'global', 'layer', or None, whether to normalize gradients.
         beta1: float, beta1 for the optimizer.
         beta2: float, beta2 for the optimizer.
         epsilon: float, epsilon for the optimizer.
@@ -187,24 +181,19 @@ def main(
         gradient_clip: float, gradient clip value.
         graft: bool, whether to graft to adam in psgd, shampoo, caspr. Default for
             psgd should be False, for shampoo and caspr should be True.
-        precondition_every_n: int, precondition every n steps.
-        precond_block_size: int, precondition block size.
-        sophia_gamma: float, gamma for the sophia optimizer.
+        shampoo_precondition_every_n: int, precondition every n steps.
+        shampoo_precond_block_size: int, precondition block size.
         psgd_precond_type: str, preconditioner type for psgd.
-        psgd_feed_into_adam: bool, whether to feed precond grads into adam.
-        psgd_heavyball: bool, whether to use heavyball momentum for psgd.
-        psgd_rank: int, rank for UVd psgd.
+        psgd_use_hessian: bool, whether to use hessian for psgd, otherwise
+            use gradient whitening.
         psgd_update_probability: float, precond update probability for psgd.
+        psgd_rank: int, rank for UVd psgd.
+        psgd_heavyball: bool, whether to use heavyball momentum for psgd.
+        psgd_feed_into_adam: bool, whether to feed precond grads into adam.
         psgd_precond_lr: float, preconditioner learning rate for psgd.
         psgd_precond_init_scale: float, initial scale for the preconditioner.
-        psgd_whitening: bool, whether to use whitening for psgd.
         mu_dtype: str, momentum dtype for the optimizer.
     """
-    lr_schedule = "linear_warmup" if schedule_free else lr_schedule
-    if norm_grads and norm_grad_type == "global" and gradient_clip is not None:
-        gradient_clip = None
-        print("Global gradient normalization is on, turning off gradient clipping.")
-
     if log_to_wandb:
         if not wandb_entity:
             print(
@@ -265,7 +254,7 @@ def main(
         optimizer=optimizer,
         learning_rate=learning_rate,
         min_learning_rate=min_learning_rate,
-        norm_grads_layerwise=norm_grads and norm_grad_type == "layer",
+        norm_grads=norm_grads,
         beta1=beta1,
         beta2=beta2,
         epsilon=epsilon,
@@ -278,17 +267,15 @@ def main(
         gradient_clip=gradient_clip,
         graft=graft,
         pmap_axis_name=None,
-        precondition_every_n=precondition_every_n,
-        precond_block_size=precond_block_size,
-        sophia_gamma=sophia_gamma,
+        shampoo_precond_every_n=shampoo_precondition_every_n,
+        shampoo_precond_block_size=shampoo_precond_block_size,
         psgd_precond_type=psgd_precond_type,
-        psgd_feed_into_adam=psgd_feed_into_adam,
-        psgd_heavyball=psgd_heavyball,
-        psgd_rank=psgd_rank,
         psgd_update_prob=psgd_update_probability,
+        psgd_rank=psgd_rank,
+        psgd_heavyball=psgd_heavyball,
+        psgd_feed_into_adam=psgd_feed_into_adam,
         psgd_precond_lr=psgd_precond_lr,
         psgd_precond_init_scale=psgd_precond_init_scale,
-        psgd_whitening=psgd_whitening,
         cooldown_steps=cooldown_steps,
         mu_dtype=mu_dtype,
     )
@@ -335,23 +322,35 @@ def main(
         key, subkey = jax.random.split(key)
         batch = generate_train_data(subkey)
 
-        key, subkey = jax.random.split(key)
-        loss, grads = jax.value_and_grad(train_loss)(params, subkey, batch)
-
-        # unit norm grads
-        if norm_grads and norm_grad_type == "global":
-            global_norm = optax.global_norm(grads)
-            grads = jax.tree.map(lambda g: g / global_norm, grads)
-
-        if optimizer in ["sophia", "psgd"]:
+        if optimizer == "psgd" and psgd_use_hessian:
+            # use helper to calc hvp and pass into PSGD
+            loss, grads, hvp, vector, update_precond = psgd_hvp_helper(
+                key,
+                train_loss,
+                params,
+                loss_fn_extra_args=(subkey, batch),
+                has_aux=False,
+                preconditioner_update_probability=psgd_update_probability,
+            )
             updates, opt_state = opt.update(
                 grads,
                 opt_state,
                 params,
-                obj_fn=lambda ps: train_loss(ps, subkey, batch),
+                Hvp=hvp,
+                vector=vector,
+                update_preconditioner=update_precond,
             )
         else:
+            key, subkey = jax.random.split(key)
+            loss, grads = jax.value_and_grad(train_loss)(params, subkey, batch)
+
+            # unit norm grads
+            if norm_grads is not None:
+                global_norm = optax.global_norm(grads)
+                grads = jax.tree.map(lambda g: g / global_norm, grads)
+
             updates, opt_state = opt.update(grads, opt_state, params)
+
         params = optax.apply_updates(params, updates)
 
         return params, opt_state, key, loss
@@ -423,20 +422,20 @@ def main(
 
 if __name__ == "__main__":
     fn = partial(
-        main,
+        run_xor_experiment,
         log_to_wandb=True,
         wandb_entity="",
         seed=5,
         criteria_threshold=0.1,
         total_steps=100_000,
         batch_size=128,
-        seq_len=50,
+        seq_len=40,
         model_type="rnn",
         dim_hidden=32,
         n_layers=1,
         n_heads=2,
         ff_dim=32,
-        l2_reg=1e-4,
+        l2_reg=1e-6,
         group_n_train_steps=100,
         learning_rate=0.01,
         min_learning_rate=0.0,
@@ -445,24 +444,24 @@ if __name__ == "__main__":
         cooldown_steps=0,
         schedule_free=False,
         optimizer="psgd",
-        norm_grads=False,
-        norm_grad_type="global",
+        norm_grads=None,
         beta1=0.9,
         beta2=0.999,
         epsilon=1e-8,
-        nesterov=False,
+        nesterov=True,
         weight_decay=0.0,
         gradient_clip=1.0,
         graft=False,
-        precondition_every_n=10,
-        precond_block_size=128,
-        sophia_gamma=0.05,
+        shampoo_precondition_every_n=10,
+        shampoo_precond_block_size=128,
         psgd_precond_type="uvd",
-        psgd_feed_into_adam=False,
-        psgd_heavyball=False,
-        psgd_rank=16,
+        psgd_use_hessian=True,
         psgd_update_probability=1.0,
+        psgd_rank=10,
+        psgd_heavyball=False,
+        psgd_feed_into_adam=False,
         psgd_precond_lr=0.01,
+        psgd_precond_init_scale=None,
         mu_dtype="float32",
     )
 
@@ -486,43 +485,13 @@ if __name__ == "__main__":
     print("TESTING CASPR")
     t_start = time.time()
     number_successful, step_solved, average_steps = jax.block_until_ready(
-        fn(
-            learning_rate=0.0003,
-            optimizer="caspr",
-            beta1=0.9,
-            graft=True,
-            precondition_every_n=5,
-        )
+        fn(learning_rate=0.0003, optimizer="caspr", beta1=0.9, graft=True)
     )
     time_taken = time.time() - t_start
     print(f"Time taken: {time_taken:.2f}s")
     results.append(
         {
             "optimizer": "caspr",
-            "number_successful": number_successful,
-            "step_solved": step_solved,
-            "average_steps": average_steps,
-            "time_taken": time_taken,
-        }
-    )
-
-    print("TESTING SOPHIA")
-    t_start = time.time()
-    number_successful, step_solved, average_steps = jax.block_until_ready(
-        fn(
-            learning_rate=0.00003,
-            optimizer="sophia",
-            beta1=0.965,
-            beta2=0.99,
-            gradient_clip=None,
-            precondition_every_n=1,
-        )
-    )
-    time_taken = time.time() - t_start
-    print(f"Time taken: {time_taken:.2f}s")
-    results.append(
-        {
-            "optimizer": "sophia",
             "number_successful": number_successful,
             "step_solved": step_solved,
             "average_steps": average_steps,

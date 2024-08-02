@@ -1,7 +1,8 @@
 import argparse
 
 import jax
-import jax.numpy as jnp
+from jax import numpy as jnp
+import flax
 
 
 def to_half(pytree):
@@ -29,7 +30,7 @@ def to_full(pytree):
 
 
 def z_loss(logits: jax.Array) -> jax.Array:
-    """Compute z-loss from logits.
+    """Compute palm style z-loss from logits.
 
     Args:
         logits: [batch_size, n_class] float tensor
@@ -37,12 +38,8 @@ def z_loss(logits: jax.Array) -> jax.Array:
     Returns:
         [batch_size, 1] z-loss of each example
     """
-    assert logits.dtype not in [jnp.bfloat16, jnp.float16], (
-        "z_loss does not support bfloat16 or float16. "
-        "Please cast to float32 or float64 before calling z_loss."
-    )
     log_z = jax.scipy.special.logsumexp(logits, axis=-1)
-    return jnp.expand_dims(jnp.nan_to_num(log_z**2, copy=False), axis=-1)
+    return jnp.expand_dims(log_z**2, axis=-1)
 
 
 def str2bool(v):
