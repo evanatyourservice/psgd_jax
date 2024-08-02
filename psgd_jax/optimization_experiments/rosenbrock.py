@@ -10,6 +10,7 @@ from jax.random import uniform
 import optax
 
 from psgd_jax.optimizers.psgd import psgd_hvp_helper
+from psgd_jax.optimizers.create_optimizer import create_optimizer
 
 
 def _plot_rosenbrock(test_iter, plot_title, losses, save_dir=None):
@@ -72,7 +73,7 @@ def _make_params(key):
     return {
         f"{i:02}": jnp.array(
             [
-                uniform(k[0], [], jnp.float32, -2, 0),
+                uniform(k[0], [], jnp.float32, -2, -1),
                 uniform(k[1], [], jnp.float32, -1, 3),
             ]
         )
@@ -189,3 +190,54 @@ def plot_rosenbrock(
         _plot_rosenbrock(recorded_params, plot_title, losses, save_dir)
 
     return final_loss.item()
+
+
+if __name__ == "__main__":
+    steps = 500
+    fn = partial(
+        create_optimizer,
+        optimizer="psgd",
+        learning_rate=0.2,
+        min_learning_rate=0.0,
+        norm_grads=None,
+        beta1=0.9,
+        beta2=0.999,
+        epsilon=1e-8,
+        nesterov=True,
+        weight_decay=0.0,
+        lr_schedule="linear",
+        schedule_free=False,
+        warmup_steps=0,
+        total_train_steps=steps,
+        gradient_clip=None,
+        pmap_axis_name=None,
+        graft=False,
+        shampoo_precond_every_n=2,
+        shampoo_precond_block_size=128,
+        psgd_precond_type="affine",
+        psgd_update_prob=1.0,
+        psgd_rank=10,
+        psgd_heavyball=False,
+        psgd_feed_into_adam=True,
+        psgd_precond_lr=0.3,
+        psgd_precond_init_scale=None,
+    )
+    plot = partial(plot_rosenbrock, seed=np.random.randint(0, 2**30))
+
+    opt = fn()[0]
+    plot(
+        optimizer=opt,
+        steps=steps,
+        plot_title="PSGD",
+        psgd_use_hessian=True,
+        psgd_update_probability=1.0,
+    )
+
+    opt = fn(optimizer="shampoo", learning_rate=0.02, graft=True)[0]
+    plot(optimizer=opt, steps=steps, plot_title="Shampoo")
+
+    opt = fn(optimizer="adam", learning_rate=0.3)[0]
+    plot(optimizer=opt, steps=steps, plot_title="Adam")
+
+    opt = fn(optimizer="adam", learning_rate=0.5, beta1=0.95, schedule_free=True)[0]
+    plot(optimizer=opt, steps=steps, plot_title="Schedule-free Adam")

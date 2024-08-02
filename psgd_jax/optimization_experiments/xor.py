@@ -121,13 +121,15 @@ def run_xor_experiment(
     ff_dim: int = 32,
     l2_reg: float = 0.0,
     group_n_train_steps: int = 100,
+    # optimizer
+    user_defined_optimizer: Optional[optax.GradientTransformation] = None,
+    optimizer: str = "psgd",
     learning_rate: float = 0.01,
     min_learning_rate: float = 0.0,
     lr_schedule: str = None,
     warmup_steps: int = 0,
     cooldown_steps: int = 0,
     schedule_free: bool = False,
-    optimizer: str = "psgd",
     norm_grads: str = None,
     beta1: float = 0.9,
     beta2: float = 0.999,
@@ -165,13 +167,14 @@ def run_xor_experiment(
         ff_dim: int, feed-forward dimension for the transformer model.
         l2_reg: float, L2 regularization, psgd style with random strength per param.
         group_n_train_steps: int, number of training steps to group within jit.
+        user_defined_optimizer: optax.GradientTransformation, user defined optimizer.
+        optimizer: str, optimizer to use.
         learning_rate: float, learning rate for the optimizer.
         min_learning_rate: float, minimum learning rate for the optimizer.
         lr_schedule: str, learning rate schedule for the optimizer.
         warmup_steps: int, number of warmup steps for the learning rate schedule.
         cooldown_steps: int, number of cooldown steps for the learning rate schedule.
         schedule_free: bool, whether to use a schedule-free optimizer.
-        optimizer: str, optimizer to use.
         norm_grads: str, 'global', 'layer', or None, whether to normalize gradients.
         beta1: float, beta1 for the optimizer.
         beta2: float, beta2 for the optimizer.
@@ -208,7 +211,9 @@ def run_xor_experiment(
                     "for instructions on setting wandb API key."
                 )
             wandb.login(key=os.environ["WANDB_API_KEY"], relogin=False)
-            if schedule_free:
+            if user_defined_optimizer is not None:
+                name = f"user_defined_opt_seqlen_{seq_len}"
+            elif schedule_free:
                 name = f"schedule-free_{optimizer}_seqlen={seq_len}"
             else:
                 name = f"{optimizer}_seqlen_{seq_len}"
@@ -250,35 +255,45 @@ def run_xor_experiment(
         keys = jax.random.split(key, batch_size)
         return single_sample(keys)
 
-    opt, _ = create_optimizer(
-        optimizer=optimizer,
-        learning_rate=learning_rate,
-        min_learning_rate=min_learning_rate,
-        norm_grads=norm_grads,
-        beta1=beta1,
-        beta2=beta2,
-        epsilon=epsilon,
-        nesterov=nesterov,
-        weight_decay=weight_decay,
-        lr_schedule=lr_schedule,
-        schedule_free=schedule_free,
-        warmup_steps=warmup_steps,
-        total_train_steps=total_steps,
-        gradient_clip=gradient_clip,
-        graft=graft,
-        pmap_axis_name=None,
-        shampoo_precond_every_n=shampoo_precondition_every_n,
-        shampoo_precond_block_size=shampoo_precond_block_size,
-        psgd_precond_type=psgd_precond_type,
-        psgd_update_prob=psgd_update_probability,
-        psgd_rank=psgd_rank,
-        psgd_heavyball=psgd_heavyball,
-        psgd_feed_into_adam=psgd_feed_into_adam,
-        psgd_precond_lr=psgd_precond_lr,
-        psgd_precond_init_scale=psgd_precond_init_scale,
-        cooldown_steps=cooldown_steps,
-        mu_dtype=mu_dtype,
-    )
+    if user_defined_optimizer is not None:
+        print("Using user-defined optimizer.")
+        if optimizer == "psgd" and psgd_use_hessian:
+            print(
+                "WARNING: psgd_use_hessian is True while using user defined "
+                "optimizer. If not using PSGD, consider setting psgd_use_hessian "
+                "to False to avoid unnecessary calculations."
+            )
+        opt = user_defined_optimizer
+    else:
+        opt, _ = create_optimizer(
+            optimizer=optimizer,
+            learning_rate=learning_rate,
+            min_learning_rate=min_learning_rate,
+            norm_grads=norm_grads,
+            beta1=beta1,
+            beta2=beta2,
+            epsilon=epsilon,
+            nesterov=nesterov,
+            weight_decay=weight_decay,
+            lr_schedule=lr_schedule,
+            schedule_free=schedule_free,
+            warmup_steps=warmup_steps,
+            total_train_steps=total_steps,
+            gradient_clip=gradient_clip,
+            graft=graft,
+            pmap_axis_name=None,
+            shampoo_precond_every_n=shampoo_precondition_every_n,
+            shampoo_precond_block_size=shampoo_precond_block_size,
+            psgd_precond_type=psgd_precond_type,
+            psgd_update_prob=psgd_update_probability,
+            psgd_rank=psgd_rank,
+            psgd_heavyball=psgd_heavyball,
+            psgd_feed_into_adam=psgd_feed_into_adam,
+            psgd_precond_lr=psgd_precond_lr,
+            psgd_precond_init_scale=psgd_precond_init_scale,
+            cooldown_steps=cooldown_steps,
+            mu_dtype=mu_dtype,
+        )
 
     # model
     if model_type == "rnn":
@@ -437,13 +452,14 @@ if __name__ == "__main__":
         ff_dim=32,
         l2_reg=1e-6,
         group_n_train_steps=100,
+        # optimizer
+        optimizer="psgd",
         learning_rate=0.01,
         min_learning_rate=0.0,
         lr_schedule="linear",
         warmup_steps=0,
         cooldown_steps=0,
         schedule_free=False,
-        optimizer="psgd",
         norm_grads=None,
         beta1=0.9,
         beta2=0.999,

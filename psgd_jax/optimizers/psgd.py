@@ -1,4 +1,3 @@
-from functools import partial
 from typing import Any, Optional, Union, Callable, Tuple
 
 import jax
@@ -68,6 +67,7 @@ def psgd_hvp_helper(
         return grad, loss_out
 
     def hvp_fn(params):
+        # TODO sharding
         vector = otu.tree_random_like(key1, params, jax.random.normal)
         grad, hvp, loss_out = jax.jvp(grad_fn, (params,), (vector,), has_aux=True)
 
@@ -465,9 +465,8 @@ def scale_by_psgd(
                 state.count == 0,
             )
             key, subkey = jax.random.split(key)
-            vector = otu.tree_random_like(
-                subkey, params, partial(jax.random.rademacher, dtype=jnp.float32)
-            )
+            # TODO sharding
+            vector = otu.tree_random_like(subkey, params, jax.random.normal)
 
         key, U, V, d, Qs = jax.lax.cond(
             update_preconditioner,
@@ -1177,9 +1176,8 @@ def _update_precond_affine_dropv_math(
             #   2) gradient is a short matrix, but left side is a diagonal preconditioner, right side is dense
             #   3) both sides use dense preconditioner, but gradient is skewed (no saving for square shape gradient)
             key, subkey = jax.random.split(key)
-            v = otu.tree_random_like(
-                subkey, dG, partial(jax.random.rademacher, dtype=jnp.float32)
-            )
+            # TODO sharding
+            v = otu.tree_random_like(subkey, dG, jax.random.normal)
             key, subkey = jax.random.split(key)
             return _update_precond_affine_math_(
                 subkey, Ql, Qr, v, dG, precond_lr, step_normalizer, precision

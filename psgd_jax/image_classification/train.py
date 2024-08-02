@@ -106,7 +106,30 @@ parser.add_argument(
 )
 parser.add_argument("--dropout_rate", type=float, default=0.0, help="ViT only.")
 
-# Learning rate
+# Optimizer
+parser.add_argument(
+    "--optimizer",
+    type=str,
+    default="psgd",
+    choices=[
+        "adam",
+        "adamw",
+        "lamb",
+        "adagrad",
+        "adagrad_momentum",
+        "sgd",
+        "rmsprop",
+        "radam",
+        "sm3",
+        "adabelief",
+        "novograd",
+        "adam3",
+        "lion",
+        "shampoo",
+        "caspr",
+        "psgd",
+    ],
+)
 parser.add_argument("--learning_rate", type=float, default=0.01)
 parser.add_argument("--min_learning_rate", type=float, default=0.0)
 parser.add_argument(
@@ -131,31 +154,6 @@ parser.add_argument(
         "https://arxiv.org/abs/2405.15682. Schedule-free removes momentum from "
         "optimizer and replaces with schedule-free momentum/interpolation."
     ),
-)
-
-# Optimizer
-parser.add_argument(
-    "--optimizer",
-    type=str,
-    default="psgd",
-    choices=[
-        "adam",
-        "adamw",
-        "lamb",
-        "adagrad",
-        "adagrad_momentum",
-        "sgd",
-        "rmsprop",
-        "radam",
-        "sm3",
-        "adabelief",
-        "novograd",
-        "adam3",
-        "lion",
-        "shampoo",
-        "caspr",
-        "psgd",
-    ],
 )
 parser.add_argument(
     "--norm_grads",
@@ -269,35 +267,35 @@ def main(
     n_heads: int,
     n_empty_registers: int,
     dropout_rate: float,
-    learning_rate: float,
-    min_learning_rate: float,
-    lr_schedule: str,
-    warmup_steps: int,
-    cooldown_steps: int,
-    schedule_free: bool,
-    optimizer: str,
-    norm_grads: str,
-    beta1: float,
-    beta2: float,
-    epsilon: float,
-    nesterov: bool,
-    weight_decay: float,
-    gradient_clip: float,
-    graft: bool,
-    shampoo_precondition_every_n: int,
-    shampoo_precond_block_size: int,
-    psgd_precond_type: str,
-    psgd_use_hessian: bool,
-    psgd_feed_into_adam: bool,
-    psgd_heavyball: bool,
-    psgd_rank: int,
-    psgd_update_probability: float,
-    psgd_precond_lr: float,
-    psgd_precond_init_scale: Optional[float],
-    mu_dtype: str,
+    # optimizer
+    user_defined_optimizer: Optional[optax.GradientTransformation] = None,
+    optimizer: str = "psgd",
+    learning_rate: float = 0.01,
+    min_learning_rate: float = 0.0,
+    lr_schedule: str = "linear",
+    warmup_steps: int = 512,
+    cooldown_steps: int = 10000,
+    schedule_free: bool = False,
+    norm_grads: str = None,
+    beta1: float = 0.9,
+    beta2: float = 0.999,
+    epsilon: float = 1e-8,
+    nesterov: bool = False,
+    weight_decay: float = 0.1,
+    gradient_clip: float = 1.0,
+    graft: bool = False,
+    shampoo_precondition_every_n: int = 32,
+    shampoo_precond_block_size: int = 128,
+    psgd_precond_type: str = "xmat",
+    psgd_use_hessian: bool = True,
+    psgd_feed_into_adam: bool = False,
+    psgd_heavyball: bool = False,
+    psgd_rank: int = 4,
+    psgd_update_probability: float = 0.1,
+    psgd_precond_lr: float = 0.1,
+    psgd_precond_init_scale: Optional[float] = None,
+    mu_dtype: str = "float32",
 ):
-    # TODO (evanatyourservice): allow for custom optimizer pass in
-
     # take a look at the devices and see if we're on CPU, GPU, or TPU
     devices = jax.local_devices()
     print(f"JAX Devices: {devices}")
@@ -458,35 +456,46 @@ def main(
     print(f"Total epochs: {n_epochs}")
 
     # create optimizer (and lr function for logging)
-    tx, lr_fn = create_optimizer(
-        optimizer=optimizer,
-        learning_rate=learning_rate,
-        min_learning_rate=min_learning_rate,
-        norm_grads=norm_grads,
-        beta1=beta1,
-        beta2=beta2,
-        epsilon=epsilon,
-        nesterov=nesterov,
-        weight_decay=weight_decay,
-        lr_schedule=lr_schedule,
-        schedule_free=schedule_free,
-        warmup_steps=warmup_steps,
-        total_train_steps=n_steps,
-        gradient_clip=gradient_clip,
-        pmap_axis_name="batch",
-        graft=graft,
-        shampoo_precond_every_n=shampoo_precondition_every_n,
-        shampoo_precond_block_size=shampoo_precond_block_size,
-        psgd_precond_type=psgd_precond_type,
-        psgd_update_prob=psgd_update_probability,
-        psgd_rank=psgd_rank,
-        psgd_heavyball=psgd_heavyball,
-        psgd_feed_into_adam=psgd_feed_into_adam,
-        psgd_precond_lr=psgd_precond_lr,
-        psgd_precond_init_scale=psgd_precond_init_scale,
-        cooldown_steps=cooldown_steps,
-        mu_dtype=mu_dtype,
-    )
+    if user_defined_optimizer is not None:
+        print("Using user-defined optimizer.")
+        if optimizer == "psgd" and psgd_use_hessian:
+            print(
+                "WARNING: psgd_use_hessian is True while using user defined "
+                "optimizer. If not using PSGD, consider setting psgd_use_hessian "
+                "to False to avoid unnecessary calculations."
+            )
+        tx = user_defined_optimizer
+        lr_fn = None
+    else:
+        tx, lr_fn = create_optimizer(
+            optimizer=optimizer,
+            learning_rate=learning_rate,
+            min_learning_rate=min_learning_rate,
+            norm_grads=norm_grads,
+            beta1=beta1,
+            beta2=beta2,
+            epsilon=epsilon,
+            nesterov=nesterov,
+            weight_decay=weight_decay,
+            lr_schedule=lr_schedule,
+            schedule_free=schedule_free,
+            warmup_steps=warmup_steps,
+            total_train_steps=n_steps,
+            gradient_clip=gradient_clip,
+            pmap_axis_name="batch",
+            graft=graft,
+            shampoo_precond_every_n=shampoo_precondition_every_n,
+            shampoo_precond_block_size=shampoo_precond_block_size,
+            psgd_precond_type=psgd_precond_type,
+            psgd_update_prob=psgd_update_probability,
+            psgd_rank=psgd_rank,
+            psgd_heavyball=psgd_heavyball,
+            psgd_feed_into_adam=psgd_feed_into_adam,
+            psgd_precond_lr=psgd_precond_lr,
+            psgd_precond_init_scale=psgd_precond_init_scale,
+            cooldown_steps=cooldown_steps,
+            mu_dtype=mu_dtype,
+        )
 
     # create model
     if "resnet" in model_type:
@@ -763,8 +772,9 @@ def main(
                     "test_accuracy": mean_test_acc * 100,
                     "grad_norm": mean_grad_norm,
                     "params_norm": params_norm,
-                    "lr": lr_fn(state.step[0].item()),
                 }
+                if lr_fn is not None:
+                    to_log["lr"] = lr_fn(state.step[0].item())
                 if log_to_wandb:
                     wandb.log(to_log, step=state.step[0].item())
                     wandb.summary["min_loss"] = min(all_test_losses)
@@ -774,7 +784,7 @@ def main(
                 ):
                     print(
                         "step:% 3d, train_loss: %.4f, train_accuracy: %.2f, test_loss: %.4f, "
-                        "test_accuracy: %.2f, grad_norm: %.2f, params_norm: %.2f, lr: %.6f"
+                        "test_accuracy: %.2f, grad_norm: %.2f, params_norm: %.2f"
                         % (
                             state.step[0].item(),
                             to_log["train_loss"],
@@ -783,7 +793,6 @@ def main(
                             to_log["test_accuracy"],
                             to_log["grad_norm"],
                             to_log["params_norm"],
-                            to_log["lr"],
                         )
                     )
 

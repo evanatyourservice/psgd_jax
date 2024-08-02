@@ -18,12 +18,12 @@ from psgd_jax.optimizers.optimizer_utils import norm_grads as norm_grads_transfo
 
 
 # only lets through kernel weights for weight decay
-kernels = flax.traverse_util.ModelParamTraversal(lambda p, _: "kernel" in p)
+_kernels = flax.traverse_util.ModelParamTraversal(lambda p, _: "kernel" in p)
 
 
-def kernel_mask(params):
+def _kernel_mask(params):
     all_false = jax.tree.map(lambda _: False, params)
-    out = kernels.update(lambda _: True, all_false)
+    out = _kernels.update(lambda _: True, all_false)
     return out
 
 
@@ -203,7 +203,7 @@ def create_optimizer(
         optimizer = chain[0]
     else:
         if weight_decay > 0:
-            chain += [transform.add_decayed_weights(weight_decay, mask=kernel_mask)]
+            chain += [transform.add_decayed_weights(weight_decay, mask=_kernel_mask)]
 
         if optimizer == "lamb":
             # trust ratio after weight decay
@@ -281,7 +281,7 @@ def make_schedule(
     elif lr_schedule == "rsqrt":
         if cooldown_steps == 0:
             print("WARNING: cooldown_steps is 0 but rsqrt schedule is used")
-        schedule = rsqrt_lr_schedule(
+        schedule = _rsqrt_lr_schedule(
             learning_rate,
             total_train_steps,
             warmup_steps,
@@ -294,7 +294,7 @@ def make_schedule(
             init_value=0.0, end_value=learning_rate, transition_steps=warmup_steps
         )
         constant_fn = optax.constant_schedule(learning_rate)
-        decay_fn = one_minus_sqrt_schedule(learning_rate, cooldown_steps)
+        decay_fn = _one_minus_sqrt_schedule(learning_rate, cooldown_steps)
         schedule = optax.join_schedules(
             schedules=[warmup_fn, constant_fn, decay_fn],
             boundaries=[warmup_steps, total_train_steps - cooldown_steps],
@@ -308,7 +308,7 @@ def make_schedule(
     return schedule
 
 
-def rsqrt_lr_schedule(
+def _rsqrt_lr_schedule(
     learning_rate, total_steps, warmup_steps=0, cooldown_steps=0, timescale=10000
 ):
     def step_fn(step):
@@ -327,7 +327,7 @@ def rsqrt_lr_schedule(
     return step_fn
 
 
-def one_minus_sqrt_schedule(learning_rate: float, transition_steps: int):
+def _one_minus_sqrt_schedule(learning_rate: float, transition_steps: int):
     def step_fn(step):
         factor = 1 - jnp.sqrt(step / transition_steps)
         lr = learning_rate * factor
