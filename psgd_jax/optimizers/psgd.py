@@ -121,11 +121,13 @@ def scale_by_psgd(
     uvd_rank_of_approximation: int = 10,
     affine_max_size_triangular: int = 4096,
     affine_max_skew_triangular: int = 128,
+    affine_scanned_layers: Optional[Any] = None,  # TODO (evanatyourservice)
     step_normalizer_order: str = "2nd",
     precond_lr: Union[float, Callable[[int], float]] = 0.1,
     precond_init_scale: Optional[float] = None,
     feed_into_adam: bool = False,
     graft_adam_lr: bool = False,
+    adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_norm_grads: Optional[str] = None,
     seed: Optional[PRNGKey] = None,
@@ -148,12 +150,16 @@ def scale_by_psgd(
             triangular.
         affine_max_skew_triangular: int, max skew for affine preconditioner to be
             triangular.
+        affine_scanned_layers: optional Any, pytree same structure as params denoting
+            which layers should be vmapped over for affine preconditioner (set scanned
+            layers to True).
         step_normalizer_order: str, '1st' or '2nd'.
         precond_lr: float or callable, learning rate for the preconditioner.
         precond_init_scale: optional float, initial scale for the preconditioner.
         feed_into_adam: bool, whether to feed the preconditioned gradients into
             adam optimizer.
         graft_adam_lr: bool, whether to graft adam step size for updates.
+        adam_b1: float, beta1 parameter for the grafting optimizer.
         adam_b2: float, beta2 parameter for the grafting optimizer.
         adam_norm_grads: optional str, 'global', 'layer', or None. Whether to
             normalize gradients to unit norm before grafting optimizer.
@@ -185,13 +191,13 @@ def scale_by_psgd(
             diag_opt += [clipping.clip_by_global_norm(gradient_clip)]
         diag_opt += [
             scale_by_adam(
-                b1=b1, b2=adam_b2, eps=1e-8, mu_dtype=mu_dtype, nesterov=nesterov
+                b1=adam_b1, b2=adam_b2, eps=1e-8, mu_dtype=mu_dtype, nesterov=nesterov
             )
         ]
         diag_opt = chain(*diag_opt)
 
     def init_fn(params):
-        key = seed if seed else jax.random.PRNGKey(0)
+        key = seed if seed is not None else jax.random.PRNGKey(36)
 
         # preliminary
         n_params = sum([x.size for x in jax.tree.leaves(params)])
@@ -589,6 +595,7 @@ def psgd(
     precond_init_scale: Optional[float] = None,
     feed_into_adam: bool = False,
     graft_adam_lr: bool = False,
+    adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_norm_grads: Optional[str] = None,
     seed: Optional[PRNGKey] = None,
@@ -620,6 +627,7 @@ def psgd(
         feed_into_adam: bool, whether to feed the preconditioned gradients into
             adam optimizer.
         graft_adam_lr: bool, whether to graft adam step size for updates.
+        adam_b1: float, beta1 parameter for the grafting optimizer.
         adam_b2: float, beta2 parameter for the grafting optimizer.
         adam_norm_grads: optional str, 'global', 'layer', or None. Whether to
             normalize gradients to unit norm before grafting optimizer.
@@ -647,6 +655,7 @@ def psgd(
             precond_init_scale=precond_init_scale,
             feed_into_adam=feed_into_adam,
             graft_adam_lr=graft_adam_lr,
+            adam_b1=adam_b1,
             adam_b2=adam_b2,
             adam_norm_grads=adam_norm_grads,
             seed=seed,
@@ -697,9 +706,13 @@ def _update_precond_UVd_math(
         IpVtU = I + VtU
         invQtv = v / d
 
-        # TODO (evanatyourservice): for bf16, cast to f32 and back
-        invQtv = invQtv - V @ jnp.linalg.solve(IpVtU.T, U.T @ invQtv)
-        invPv = invQtv - U @ jnp.linalg.solve(IpVtU, V.T @ invQtv)
+        orig_dtype = U.dtype
+        IpVtU = IpVtU.astype(jnp.float32)
+        U_solve = jnp.linalg.solve(IpVtU.T, (U.T @ invQtv).astype(jnp.float32))
+        invQtv = invQtv - V @ U_solve.astype(orig_dtype)
+        V_solve = jnp.linalg.solve(IpVtU, (V.T @ invQtv).astype(jnp.float32))
+        invPv = invQtv - U @ V_solve.astype(orig_dtype)
+        IpVtU = IpVtU.astype(orig_dtype)
         invPv = invPv / d
 
         nablaD = Ph * h - v * invPv
@@ -878,11 +891,11 @@ def _shape_as_matrix(x: jax.Array) -> tuple:
         else:
             for i in range(len(p0)):
                 for q in permutations(p0[:i] + p0[i + 1 :]):
-                    yield (p0[i], *q)
+                    yield p0[i], *q
 
     # here begins the processing
     if x.ndim == 2:  # t already is a matrix, do nothing
-        return (lambda u: u, lambda v: v, x.shape)
+        return lambda u: u, lambda v: v, x.shape
     elif x.ndim < 2:  # scalar or vector, simple reshape to matrix
         mtx_shape = (1, x.size)
         return (
@@ -1103,6 +1116,7 @@ def _update_precond_affine_dropv_math(
 
             key, subkey = jax.random.split(key)
             Ql, Qr = balance(subkey, Ql, Qr)
+
         elif Ql.ndim == 1 and Qr.ndim == 2 and Ql.shape[0] >= Qr.shape[0]:
             # drop v when left is diagonal, right is dense, and gradient is a tall matrix
             A = (Ql[:, None] * dG) @ Qr.conj().T
@@ -1129,6 +1143,7 @@ def _update_precond_affine_dropv_math(
 
             key, subkey = jax.random.split(key)
             Ql, Qr = balance(subkey, Ql, Qr)
+
         elif Qr.ndim == 1 and Ql.ndim == 2 and Qr.shape[0] >= Ql.shape[0]:
             # drop v when right is diagonal, left is dense, and gradient is a short matrix
             A = Ql @ (dG * Qr.conj())
@@ -1155,6 +1170,7 @@ def _update_precond_affine_dropv_math(
 
             key, subkey = jax.random.split(key)
             Ql, Qr = balance(subkey, Ql, Qr)
+
         else:
             # keeping v as an auxiliary variable could save computations (tradeoff of performance, similar to Hutchinson’s trick) when
             #   1) gradient is a tall matrix, but left side is a dense preconditioner, right side is diagonal
@@ -1169,7 +1185,7 @@ def _update_precond_affine_dropv_math(
                 subkey, Ql, Qr, v, dG, precond_lr, step_normalizer, precision
             )
 
-        return Ql, Qr
+        return [Ql, Qr]
 
 
 def _precond_grad_affine_math(Ql, Qr, grad, precision):

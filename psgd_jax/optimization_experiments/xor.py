@@ -106,7 +106,7 @@ class Transformer(nn.Module):
         return nn.Dense(features=1, kernel_init=normal_init, use_bias=False)(x)
 
 
-def main(
+def run_xor_experiment(
     log_to_wandb: bool = True,
     wandb_entity: str = "",
     seed: int = 5,
@@ -119,7 +119,7 @@ def main(
     n_layers: int = 1,
     n_heads: int = 2,
     ff_dim: int = 32,
-    l2_reg: float = 1e-6,
+    l2_reg: float = 0.0,
     group_n_train_steps: int = 100,
     learning_rate: float = 0.01,
     min_learning_rate: float = 0.0,
@@ -422,14 +422,14 @@ def main(
 
 if __name__ == "__main__":
     fn = partial(
-        main,
+        run_xor_experiment,
         log_to_wandb=True,
         wandb_entity="",
         seed=5,
         criteria_threshold=0.1,
         total_steps=100_000,
         batch_size=128,
-        seq_len=32,
+        seq_len=40,
         model_type="rnn",
         dim_hidden=32,
         n_layers=1,
@@ -445,7 +445,7 @@ if __name__ == "__main__":
         schedule_free=False,
         optimizer="psgd",
         norm_grads=None,
-        beta1=0.0,
+        beta1=0.9,
         beta2=0.999,
         epsilon=1e-8,
         nesterov=True,
@@ -485,13 +485,7 @@ if __name__ == "__main__":
     print("TESTING CASPR")
     t_start = time.time()
     number_successful, step_solved, average_steps = jax.block_until_ready(
-        fn(
-            learning_rate=0.0003,
-            optimizer="caspr",
-            beta1=0.9,
-            graft=True,
-            shampoo_precondition_every_n=5,
-        )
+        fn(learning_rate=0.0003, optimizer="caspr", beta1=0.9, graft=True)
     )
     time_taken = time.time() - t_start
     print(f"Time taken: {time_taken:.2f}s")

@@ -71,7 +71,7 @@ parser.add_argument(
 parser.add_argument("--batch_size", type=int, default=256)
 parser.add_argument("--n_epochs", type=int, default=200)
 parser.add_argument("--bfloat16", type=str2bool, default=False)
-parser.add_argument("--l2_regularization", type=float, default=0.0)
+parser.add_argument("--l2_regularization", type=float, default=1e-6)
 parser.add_argument(
     "--randomize_l2_reg",
     type=str2bool,
@@ -211,7 +211,7 @@ parser.add_argument(
 parser.add_argument(
     "--psgd_precond_type", type=str, default="xmat", choices=["xmat", "uvd", "affine"]
 )
-parser.add_argument("--psgd_use_hessian", type=str2bool, default=False)
+parser.add_argument("--psgd_use_hessian", type=str2bool, default=True)
 parser.add_argument(
     "--psgd_feed_into_adam",
     type=str2bool,
@@ -366,7 +366,6 @@ def main(
                 train=True,
                 platform=platform,
                 dtype=tf.float32,
-                image_size=224,
                 shuffle_buffer_size=250 if dataset == "imagenette" else 2000,
                 prefetch=4,
             )
@@ -376,7 +375,6 @@ def main(
                 train=False,
                 platform=platform,
                 dtype=tf.float32,
-                image_size=224,
                 shuffle_buffer_size=250 if dataset == "imagenette" else 2000,
                 prefetch=4,
             )
@@ -688,6 +686,7 @@ def main(
         image_size = 224 if dataset in ["imagenet", "imagenette"] else 32
         dummy_image = jnp.ones([1, image_size, image_size, 3])  # batch size 1 for init
         variables = model.init(rng, dummy_image, is_training=False)
+
         opt_state = tx.init(variables["params"])
 
         print("Network params:")
@@ -801,22 +800,22 @@ def main(
 if __name__ == "__main__":
     args = vars(parser.parse_args())
 
-    small_test = False
-    if small_test:
+    tiny_test = False
+    if tiny_test:
         args["n_epochs"] = 4
-        args["batch_size"] = 32
+        args["batch_size"] = 64
         args["dataset"] = "cifar10"
         args["model_type"] = "vit"
         args["n_layers"] = 3
         args["enc_dim"] = 32
         args["n_heads"] = 2
         args["optimizer"] = "psgd"
-        args["learning_rate"] = 0.01
+        args["learning_rate"] = 0.003
         args["lr_schedule"] = "linear"
         args["warmup_steps"] = 100
-        args["cooldown_steps"] = 0
         args["weight_decay"] = 0.001
         args["gradient_clip"] = 1.0
+        args["psgd_precond_type"] = "xmat"
         args["psgd_use_hessian"] = True
         args["psgd_feed_into_adam"] = True
 

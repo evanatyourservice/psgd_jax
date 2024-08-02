@@ -20,6 +20,8 @@ import jax
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
+from psgd_jax.image_classification.tf_preprocessing_tools import random_erasing
+
 
 IMAGE_SIZE = 224
 CROP_PADDING = 32
@@ -160,6 +162,10 @@ def preprocess_for_train(image_bytes, dtype=tf.float32, image_size=IMAGE_SIZE):
     image = _decode_and_random_crop(image_bytes, image_size)
     image = tf.reshape(image, [image_size, image_size, 3])
     image = tf.image.random_flip_left_right(image)
+
+    # a little extra augmentation
+    image = random_erasing(image, probability=0.75, min_area=0.02, max_area=0.1)
+
     image = normalize_image(image)
     image = tf.image.convert_image_dtype(image, dtype=dtype)
     return image

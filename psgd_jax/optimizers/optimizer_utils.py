@@ -44,22 +44,3 @@ def norm_grads(layerwise: bool = False) -> base.GradientTransformation:
         return updates, state
 
     return base.GradientTransformation(init_fn, update_fn)
-
-
-def split_scanned_params(params):
-    """Splits scanned layers into separate layers for flax models.
-
-    Looks for layers with "scan" in the path and splits them into a dict
-    where the key is the index of the layer, e.g.
-    `{"kernel": [-0.1, 0.0, 0.1]} -> {"kernel": {"0": -0.1, "1": 0.0, "2": 0.1}}`
-    """
-    return flax.traverse_util.ModelParamTraversal(
-        lambda path, param: "scan" in path
-    ).update(lambda scanned: {f"{i}": p for i, p in enumerate(scanned)}, params)
-
-
-def merge_scanned_params(params, goal_structure: jax.tree_util.PyTreeDef):
-    """Merges separated scanned layers back into a single layer."""
-    params = goal_structure.flatten_up_to(params)
-    params = [jnp.stack(list(l.values())) if isinstance(l, dict) else l for l in params]
-    return jax.tree.unflatten(goal_structure, params)
