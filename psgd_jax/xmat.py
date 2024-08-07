@@ -23,8 +23,8 @@ class PSGDXMatState(NamedTuple):
 
 def scale_by_xmat(
     preconditioner_update_probability: float = 1.0,
-    b1: float = 0.0,
-    nesterov: bool = False,
+    b1: float = 0.9,
+    nesterov: bool = True,
     gradient_clip: Optional[float] = None,
     step_normalizer_order: str = "2nd",
     precond_lr: Union[float, Callable[[int], float]] = 0.1,
@@ -187,8 +187,8 @@ def scale_by_xmat(
 def xmat(
     learning_rate: Union[float, Callable[[int], float]] = 0.01,
     preconditioner_update_probability: float = 1.0,
-    b1: float = 0.0,
-    nesterov: bool = False,
+    b1: float = 0.9,
+    nesterov: bool = True,
     gradient_clip: Optional[float] = None,
     weight_decay: float = 0.0,
     mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,

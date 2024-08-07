@@ -24,8 +24,8 @@ class PSGDLRAState(NamedTuple):
 
 def scale_by_lra(
     preconditioner_update_probability: float = 1.0,
-    b1: float = 0.0,
-    nesterov: bool = False,
+    b1: float = 0.9,
+    nesterov: bool = True,
     gradient_clip: Optional[float] = None,
     uvd_rank_of_approximation: int = 10,
     step_normalizer_order: str = "2nd",
@@ -214,8 +214,8 @@ def scale_by_lra(
 def low_rank_approximation(
     learning_rate: Union[float, Callable[[int], float]] = 0.01,
     preconditioner_update_probability: float = 1.0,
-    b1: float = 0.0,
-    nesterov: bool = False,
+    b1: float = 0.9,
+    nesterov: bool = True,
     gradient_clip: Optional[float] = None,
     weight_decay: float = 0.0,
     mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,

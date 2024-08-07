@@ -22,8 +22,8 @@ class PSGDAffineState(NamedTuple):
 
 def scale_by_affine(
     preconditioner_update_probability: float = 1.0,
-    b1: float = 0.0,
-    nesterov: bool = False,
+    b1: float = 0.9,
+    nesterov: bool = True,
     gradient_clip: Optional[float] = None,
     max_size_triangular: int = 4096,
     max_skew_triangular: int = 128,
@@ -238,8 +238,8 @@ def scale_by_affine(
 def affine(
     learning_rate: Union[float, Callable[[int], float]] = 0.01,
     preconditioner_update_probability: float = 1.0,
-    b1: float = 0.0,
-    nesterov: bool = False,
+    b1: float = 0.9,
+    nesterov: bool = True,
     gradient_clip: Optional[float] = None,
     weight_decay: float = 0.0,
     mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
