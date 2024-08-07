@@ -73,7 +73,7 @@ vector used to calculate the hessian vector product, and `update_preconditioner`
 that tells PSGD whether we're updating the preconditioner this step (passed in real hvp and 
 vector) or not (passed in dummy hvp and vector).
 
-The hessian_helper function can help with this:
+The `hessian_helper` function can help with this:
 
 ```python
 import jax
@@ -138,7 +138,7 @@ while True:
 # yay
 ```
 
-If preconditioner_update_probability is lowered, time is saved by calculating the hessian less 
+If `preconditioner_update_probability` is lowered, time is saved by calculating the hessian less 
 often, but convergence could be slower.
 
 ## PSGD variants
