@@ -143,7 +143,7 @@ often, but convergence could be slower.
 
 ## PSGD variants
 
-`psgd.xmat` `psgd.low_rank_approximation` `psgd.affine`
+`psgd_jax.xmat` `psgd_jax.low_rank_approximation` `psgd_jax.affine`
 
 There are three variants of PSGD: XMat, which uses an x-shaped global preconditioner, LRA, which 
 uses a low-rank approximation global preconditioner, and Affine, which uses block diagonal or 
