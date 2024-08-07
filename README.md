@@ -33,6 +33,7 @@ x = jnp.array([0.0, 0.0, 0.0])
 # make optimizer and init state
 opt = xmat(
     learning_rate=1.0,
+    b1=0.0,
     preconditioner_update_probability=1.0,  # preconditioner update frequency
 )
 opt_state = opt.init(params)
@@ -73,7 +74,7 @@ vector used to calculate the hessian vector product, and `update_preconditioner`
 that tells PSGD whether we're updating the preconditioner this step (passed in real hvp and 
 vector) or not (passed in dummy hvp and vector).
 
-The `hessian_helper` function can help with this:
+The `hessian_helper` function can help with this and generally replace `jax.value_and_grad`:
 
 ```python
 import jax
@@ -92,7 +93,10 @@ x = jnp.array([0.0, 0.0, 0.0])
 
 # make optimizer and init state
 # no need to set 'preconditioner_update_probability' here, it's handled by hessian_helper
-opt = xmat(learning_rate=1.0)
+opt = xmat(
+    learning_rate=1.0,
+    b1=0.0,
+)
 opt_state = opt.init(params)
 
 
