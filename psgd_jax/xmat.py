@@ -156,7 +156,7 @@ def scale_by_xmat(
 
         # preconditioning
         flat_updates = jnp.concatenate(
-            [jnp.reshape(x, (-1,)) for x in jax.tree_leaves(updates)], 0
+            [jnp.reshape(x, (-1,)) for x in jax.tree.leaves(updates)], 0
         )
         flat_updates = _precond_grad_Xmat_math(a, b, flat_updates)
 

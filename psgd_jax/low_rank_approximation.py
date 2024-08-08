@@ -183,7 +183,7 @@ def scale_by_lra(
 
         # preconditioning
         flat_updates = jnp.concatenate(
-            [jnp.reshape(x, (-1, 1)) for x in jax.tree_leaves(updates)], 0
+            [jnp.reshape(x, (-1, 1)) for x in jax.tree.leaves(updates)], 0
         )
         flat_updates = _precond_grad_UVd_math(U, V, d, flat_updates)
 
