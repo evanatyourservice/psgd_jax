@@ -308,28 +308,36 @@ def _norm_lower_bound(A: jax.Array):
         norm(A) <= sqrt(2) * norm_lower_bound(A)
     Looks to be a very tight lower bound.
     """
-    aa = jnp.real(A * A.conj())
-    value0, i = jnp.max(jnp.sum(aa, axis=0), 0)
-    value1, j = jnp.max(jnp.sum(aa, axis=1), 0)
+    max_abs = jnp.max(jnp.abs(A))
 
-    def gt_branch():
-        x = A[:, i].conj() @ A
-        return jnp.linalg.norm((x / jnp.linalg.norm(x)) @ A.conj().T)
+    def calc(A):
+        A = A / max_abs
 
-    def le_branch():
-        x = A @ A[j].conj()
-        normx = jnp.linalg.norm(x)
-        return jax.lax.cond(
-            normx > 0, lambda: jnp.linalg.norm(A.conj().T @ (x / normx)), lambda: normx
-        )
+        aa = jnp.real(A * A.conj())
 
-    return jax.lax.cond(value0 > value1, gt_branch, le_branch)
+        aa_sum0 = jnp.sum(aa, axis=0)
+        aa_sum1 = jnp.sum(aa, axis=1)
+        i = jnp.argmax(aa_sum0, 0)
+        j = jnp.argmax(aa_sum1, 0)
+        value0 = jax.lax.dynamic_index_in_dim(aa_sum0, i, 0, keepdims=False)
+        value1 = jax.lax.dynamic_index_in_dim(aa_sum1, j, 0, keepdims=False)
 
+        def gt_branch():
+            x = jax.lax.dynamic_index_in_dim(A, i, 1, keepdims=False)
+            x = x.conj() @ A
+            return max_abs * jnp.linalg.norm((x / jnp.linalg.norm(x)) @ A.conj().T)
 
-def _triu01(A):
-    # it is useful as for a small A, the R of QR decomposition qr(I + A) is about
-    # I + triu(A, 0) + triu(A, 1)
-    return jnp.triu(A, 0) + jnp.triu(A, 1)
+        def le_branch():
+            x = jax.lax.dynamic_index_in_dim(A, j, 0, keepdims=False)
+            x = A @ x.conj()
+            return max_abs * jnp.linalg.norm(A.conj().T @ (x / jnp.linalg.norm(x)))
+
+        return jax.lax.cond(value0 > value1, gt_branch, le_branch)
+
+    def pass_calc(A):
+        return max_abs
+
+    return jax.lax.cond(max_abs > 0, calc, pass_calc, A)
 
 
 def _shape_as_matrix(x: jax.Array) -> tuple:
@@ -433,7 +441,6 @@ def _update_precond_affine_math_(
     key, Ql, Qr, dX, dG, precond_lr, step_normalizer, precision
 ):
     with jax.default_matmul_precision(precision):
-
         if Ql.ndim == 2:
             if Qr.ndim == 2:  # Ql.dim()=2 and Qr.dim()=2:
                 A = jnp.linalg.multi_dot([Ql, dG, Qr.conj().T])
@@ -444,12 +451,13 @@ def _update_precond_affine_math_(
                 )
 
                 AhA, BhB = A.conj().T @ A, Bh @ Bh.conj().T
-                grad1 = _triu01(A @ A.conj().T - BhB)
-                grad2 = _triu01(AhA - Bh.conj().T @ Bh)
+                AAh, BBh = A @ A.conj().T, Bh.conj().T @ Bh
+                grad1 = jnp.triu(AAh - BhB)
+                grad2 = jnp.triu(AhA - BBh)
 
                 if step_normalizer == "2nd":
-                    step1 = precond_lr / add_eps(jnp.trace(AhA) + jnp.trace(BhB))
-                    step2 = step1
+                    step1 = precond_lr / add_eps(_norm_lower_bound(AAh + BhB))
+                    step2 = precond_lr / add_eps(_norm_lower_bound(AhA + BBh))
                 else:
                     step1 = precond_lr / add_eps(_norm_lower_bound(grad1))
                     step2 = precond_lr / add_eps(_norm_lower_bound(grad2))
@@ -464,11 +472,11 @@ def _update_precond_affine_math_(
                 AAc, BBc = jnp.sum(A * A.conj(), axis=0), jnp.sum(
                     Bh * Bh.conj(), axis=0
                 )
-                grad1 = _triu01(AAh - BhB)
+                grad1 = jnp.triu(AAh - BhB)
                 grad2 = AAc - BBc
 
                 if step_normalizer == "2nd":
-                    step1 = precond_lr / add_eps(jnp.trace(AAh + BhB))
+                    step1 = precond_lr / add_eps(_norm_lower_bound(AAh + BhB))
                     step2 = precond_lr / add_eps(jnp.max(jnp.real(AAc + BBc)))
                 else:
                     step1 = precond_lr / add_eps(_norm_lower_bound(grad1))
@@ -488,11 +496,11 @@ def _update_precond_affine_math_(
                 )
                 AhA, BBh = A.conj().T @ A, Bh.conj().T @ Bh
                 grad1 = AAc - BBc
-                grad2 = _triu01(AhA - BBh)
+                grad2 = jnp.triu(AhA - BBh)
 
                 if step_normalizer == "2nd":
                     step1 = precond_lr / add_eps(jnp.max(jnp.real(AAc + BBc)))
-                    step2 = precond_lr / add_eps(jnp.trace(AhA + BBh))
+                    step2 = precond_lr / add_eps(_norm_lower_bound(AhA + BBh))
                 else:
                     step1 = precond_lr / add_eps(jnp.max(jnp.abs(grad1)))
                     step2 = precond_lr / add_eps(_norm_lower_bound(grad2))
@@ -598,11 +606,11 @@ def _update_precond_affine_dropv_math(
             AAc, BBc = jnp.sum(A * A.conj(), axis=1), jnp.trace(invQQr) * invQQl
             AhA, BBh = A.conj().T @ A, jnp.sum(invQQl) * invQQr
             grad1 = AAc - BBc
-            grad2 = _triu01(AhA - BBh)
+            grad2 = jnp.triu(AhA - BBh)
 
             if step_normalizer == "2nd":
                 step1 = precond_lr / add_eps(jnp.max(jnp.real(AAc + BBc)))
-                step2 = precond_lr / add_eps(jnp.trace(AhA + BBh))
+                step2 = precond_lr / add_eps(_norm_lower_bound(AhA + BBh))
             else:
                 step1 = precond_lr / add_eps(jnp.max(jnp.abs(grad1)))
                 step2 = precond_lr / add_eps(_norm_lower_bound(grad2))
@@ -624,11 +632,11 @@ def _update_precond_affine_dropv_math(
 
             AAh, BhB = A @ A.conj().T, jnp.sum(invQQr) * invQQl
             AAc, BBc = jnp.sum(A * A.conj(), axis=0), jnp.trace(invQQl) * invQQr
-            grad1 = _triu01(AAh - BhB)
+            grad1 = jnp.triu(AAh - BhB)
             grad2 = AAc - BBc
 
             if step_normalizer == "2nd":
-                step1 = precond_lr / add_eps(jnp.trace(AAh + BhB))
+                step1 = precond_lr / add_eps(_norm_lower_bound(AAh + BhB))
                 step2 = precond_lr / add_eps(jnp.max(jnp.real(AAc + BBc)))
             else:
                 step1 = precond_lr / add_eps(_norm_lower_bound(grad1))

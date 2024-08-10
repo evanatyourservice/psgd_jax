@@ -148,16 +148,12 @@ def _run_test(
 
 def main():
     print("Testing PSGD variants on Rosenbrock function")
-    print(
-        "(Affine PSGD usually does best at this because each layer is a "
-        "separate rosenbrock)"
-    )
 
     for use_hessian in [True, False]:
         for precond_type in ["xmat", "low_rank_approximation", "affine"]:
             steps = 100
             psgd_update_probability = 1.0
-            learning_rate = optax.linear_schedule(5.0, 0.0, steps)
+            learning_rate = optax.linear_schedule(4.0, 0.0, steps)
             kwargs = {
                 "learning_rate": learning_rate,
                 "b1": 0.0,
