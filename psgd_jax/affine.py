@@ -668,9 +668,3 @@ def _precond_grad_affine_math(Ql, Qr, grad):
             )
         else:  # Ql.ndim=1 and Qr.ndim=1:
             return (Ql * Ql.conj())[:, None] * grad * (Qr * Qr.conj())
-
-
-if __name__ == "__main__":
-    print(
-        jax.tree.map(lambda x: x.shape, _initQ((1024, 3), 4096, 32, dtype=jnp.float32))
-    )
