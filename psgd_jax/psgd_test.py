@@ -108,6 +108,7 @@ def _run_test(
             # use helper to compute hvp and pass into PSGD
             loss_out, grads, hvp, vector, update_precond = hessian_helper(
                 subkey,
+                i,
                 _loss_fn_rosenbrock,
                 params,
                 loss_fn_extra_args=(),

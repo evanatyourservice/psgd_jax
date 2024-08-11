@@ -14,6 +14,7 @@ def add_eps(x):
 
 def hessian_helper(
     key: PRNGKey,
+    train_step: int,
     loss_fn: Callable,
     params: base.Params,
     loss_fn_extra_args: Tuple = (),
@@ -31,6 +32,7 @@ def hessian_helper(
 
     Args:
         key: PRNGKey, random key.
+        train_step: int, current train step needed to init preconditioner on first step.
         loss_fn: callable, loss function.
         params: flax.Params, model parameters.
         loss_fn_extra_args: tuple, extra arguments for loss function to be used as
@@ -65,7 +67,10 @@ def hessian_helper(
         dummy_vector = jax.tree.map(jnp.zeros_like, params)
         return grad, loss_out, dummy_hvp, dummy_vector
 
-    update_precond = jax.random.uniform(key2) < preconditioner_update_probability
+    update_precond = jnp.logical_or(
+        jax.random.uniform(key2) < preconditioner_update_probability, train_step < 2
+    )
+
     grad, loss_out, hvp, vector = jax.lax.cond(update_precond, hvp_fn, g_fn, params)
     return loss_out, grad, hvp, vector, update_precond
 

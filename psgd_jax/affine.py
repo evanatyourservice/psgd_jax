@@ -190,7 +190,7 @@ def scale_by_affine(
             key, subkey = jax.random.split(key)
             update_preconditioner = jnp.logical_or(
                 jax.random.uniform(subkey) < preconditioner_update_probability,
-                state.count == 0,
+                state.count < 2,
             )
             # use grads as Hvp
             Hvp = updates
