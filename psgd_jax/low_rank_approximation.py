@@ -188,8 +188,6 @@ def scale_by_lra(
             [jnp.reshape(x, (-1, 1)) for x in jax.tree.leaves(updates)], 0
         )
         flat_updates = _precond_grad_UVd_math(U, V, d, flat_updates)
-
-        # permute and reshape back to original structure
         with jax.ensure_compile_time_eval():
             params_struct = jax.tree.structure(updates)
             param_sizes = [x.size for x in jax.tree.leaves(updates)]
@@ -201,6 +199,7 @@ def scale_by_lra(
         ]
         updates = jax.tree.unflatten(params_struct, flat_updates)
 
+        # clipping
         if update_global_norm_clip is not None:
             updates, _ = clipping.clip_by_global_norm(update_global_norm_clip).update(
                 updates, base.EmptyState

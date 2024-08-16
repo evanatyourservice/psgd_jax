@@ -92,4 +92,4 @@ def apply_momentum(
 
 
 def add_eps(x):
-    return jnp.where(x == 0, jnp.finfo(x.dtype).tiny, x)
+    return jnp.clip(x, 1e-25, None)

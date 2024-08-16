@@ -220,11 +220,10 @@ def scale_by_affine(
             _precond_grad_affine_math(Qlr[0], Qlr[1], g)
             for (Qlr, g) in zip(Qs, flat_updates)
         ]
-
-        # permute and reshape back to original structure
         flat_updates = [r[1](u) for u, r in zip(flat_updates, affine_reshapers)]
         updates = jax.tree_unflatten(jax.tree.structure(updates), flat_updates)
 
+        # clipping
         if update_global_norm_clip is not None:
             updates, _ = clipping.clip_by_global_norm(update_global_norm_clip).update(
                 updates, base.EmptyState
