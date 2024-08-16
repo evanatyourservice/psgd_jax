@@ -23,8 +23,9 @@ class PSGDAffineState(NamedTuple):
 def scale_by_affine(
     preconditioner_update_probability: float = 1.0,
     b1: float = 0.9,
-    nesterov: bool = True,
-    gradient_clip: Optional[float] = None,
+    nesterov: bool = False,
+    update_global_norm_clip: Optional[float] = None,
+    update_elementwise_clip: bool = False,
     max_size_triangular: int = 4096,
     max_skew_triangular: int = 128,
     step_normalizer_order: str = "2nd",
@@ -42,7 +43,8 @@ def scale_by_affine(
             preconditioner.
         b1: float, momentum parameter.
         nesterov: bool, whether to use Nesterov momentum.
-        gradient_clip: optional float, global gradient norm clipping.
+        update_global_norm_clip: optional float, clip updates by global norm.
+        update_elementwise_clip: bool, whether to clip updates to within [-1, 1].
         max_size_triangular: int, max size for affine preconditioner to be
             triangular.
         max_skew_triangular: int, max skew for affine preconditioner to be
@@ -223,10 +225,12 @@ def scale_by_affine(
         flat_updates = [r[1](u) for u, r in zip(flat_updates, affine_reshapers)]
         updates = jax.tree_unflatten(jax.tree.structure(updates), flat_updates)
 
-        if gradient_clip is not None:
-            updates, _ = clipping.clip_by_global_norm(gradient_clip).update(
+        if update_global_norm_clip is not None:
+            updates, _ = clipping.clip_by_global_norm(update_global_norm_clip).update(
                 updates, base.EmptyState
             )
+        if update_elementwise_clip:
+            updates = jax.tree.map(lambda x: jnp.clip(x, -1.0, 1.0), updates)
 
         mu = otu.tree_cast(mu, mu_dtype)
         state = PSGDAffineState(count=count_inc, key=key, mu=mu, Qs=Qs)
@@ -239,8 +243,9 @@ def affine(
     learning_rate: Union[float, Callable[[int], float]] = 0.01,
     preconditioner_update_probability: float = 1.0,
     b1: float = 0.9,
-    nesterov: bool = True,
-    gradient_clip: Optional[float] = None,
+    nesterov: bool = False,
+    update_global_norm_clip: Optional[float] = None,
+    update_elementwise_clip: bool = False,
     weight_decay: float = 0.0,
     mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
     max_size_triangular: int = 4096,
@@ -261,7 +266,8 @@ def affine(
             preconditioner.
         b1: float, momentum parameter.
         nesterov: bool, whether to use Nesterov momentum.
-        gradient_clip: optional float, global gradient norm clipping.
+        update_global_norm_clip: optional float, clip updates by global norm.
+        update_elementwise_clip: bool, whether to clip updates to within [-1, 1].
         weight_decay: float, weight decay.
         mask: optional Any or callable, mask to apply to parameters.
         max_size_triangular: int, max size for affine preconditioner to be
@@ -284,7 +290,8 @@ def affine(
             preconditioner_update_probability=preconditioner_update_probability,
             b1=b1,
             nesterov=nesterov,
-            gradient_clip=gradient_clip,
+            update_global_norm_clip=update_global_norm_clip,
+            update_elementwise_clip=update_elementwise_clip,
             max_size_triangular=max_size_triangular,
             max_skew_triangular=max_skew_triangular,
             step_normalizer_order=step_normalizer_order,

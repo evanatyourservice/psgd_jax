@@ -24,8 +24,9 @@ class PSGDXMatState(NamedTuple):
 def scale_by_xmat(
     preconditioner_update_probability: float = 1.0,
     b1: float = 0.9,
-    nesterov: bool = True,
-    gradient_clip: Optional[float] = None,
+    nesterov: bool = False,
+    update_global_norm_clip: Optional[float] = None,
+    update_elementwise_clip: bool = False,
     step_normalizer_order: str = "2nd",
     precond_lr: Union[float, Callable[[int], float]] = 0.1,
     precond_init_scale: Optional[float] = None,
@@ -41,7 +42,8 @@ def scale_by_xmat(
             preconditioner.
         b1: float, momentum parameter.
         nesterov: bool, whether to use Nesterov momentum.
-        gradient_clip: optional float, global gradient norm clipping.
+        update_global_norm_clip: optional float, clip updates by global norm.
+        update_elementwise_clip: bool, whether to clip updates to within [-1, 1].
         step_normalizer_order: str, '1st' or '2nd'.
         precond_lr: float or callable, learning rate for the preconditioner.
         precond_init_scale: optional float, initial scale for the preconditioner.
@@ -172,10 +174,12 @@ def scale_by_xmat(
         ]
         updates = jax.tree.unflatten(params_struct, flat_updates)
 
-        if gradient_clip:
-            updates, _ = clipping.clip_by_global_norm(gradient_clip).update(
+        if update_global_norm_clip:
+            updates, _ = clipping.clip_by_global_norm(update_global_norm_clip).update(
                 updates, base.EmptyState
             )
+        if update_elementwise_clip:
+            updates = jax.tree.map(lambda x: jnp.clip(x, -1.0, 1.0), updates)
 
         mu = otu.tree_cast(mu, mu_dtype)
         state = PSGDXMatState(count=count_inc, key=key, mu=mu, a=a, b=b)
@@ -188,8 +192,9 @@ def xmat(
     learning_rate: Union[float, Callable[[int], float]] = 0.01,
     preconditioner_update_probability: float = 1.0,
     b1: float = 0.9,
-    nesterov: bool = True,
-    gradient_clip: Optional[float] = None,
+    nesterov: bool = False,
+    update_global_norm_clip: Optional[float] = None,
+    update_elementwise_clip: bool = False,
     weight_decay: float = 0.0,
     mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
     step_normalizer_order: str = "2nd",
@@ -208,7 +213,8 @@ def xmat(
             preconditioner.
         b1: float, momentum parameter.
         nesterov: bool, whether to use Nesterov momentum.
-        gradient_clip: optional float, global gradient norm clipping.
+        update_global_norm_clip: optional float, clip updates by global norm.
+        update_elementwise_clip: bool, whether to clip updates to within [-1, 1].
         weight_decay: float, weight decay.
         mask: optional mask for weight decay.
         step_normalizer_order: str, '1st' or '2nd'.
@@ -227,7 +233,8 @@ def xmat(
             preconditioner_update_probability=preconditioner_update_probability,
             b1=b1,
             nesterov=nesterov,
-            gradient_clip=gradient_clip,
+            update_global_norm_clip=update_global_norm_clip,
+            update_elementwise_clip=update_elementwise_clip,
             step_normalizer_order=step_normalizer_order,
             precond_lr=precond_lr,
             precond_init_scale=precond_init_scale,

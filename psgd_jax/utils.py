@@ -8,10 +8,6 @@ from optax._src import base
 from optax._src.numerics import safe_int32_increment
 
 
-def add_eps(x):
-    return jnp.where(x == 0, jnp.finfo(x.dtype).tiny, x)
-
-
 def hessian_helper(
     key: PRNGKey,
     train_step: int,
@@ -93,3 +89,7 @@ def apply_momentum(
         updates = otu.tree_bias_correction(mu, b1, step)
 
     return updates, mu
+
+
+def add_eps(x):
+    return jnp.where(x == 0, jnp.finfo(x.dtype).tiny, x)
