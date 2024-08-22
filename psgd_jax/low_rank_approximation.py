@@ -26,12 +26,11 @@ def scale_by_lra(
     preconditioner_update_probability: float = 1.0,
     b1: float = 0.9,
     nesterov: bool = False,
-    update_global_norm_clip: Optional[float] = None,
-    update_elementwise_clip: bool = False,
     uvd_rank_of_approximation: int = 10,
-    step_normalizer_order: str = "2nd",
     precond_lr: Union[float, Callable[[int], float]] = 0.1,
     precond_init_scale: Optional[float] = None,
+    update_global_norm_clip: Optional[float] = None,
+    step_normalizer_order: str = "2nd",
     seed: Optional[PRNGKey] = None,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
     precision: str = "tensorfloat32",
@@ -44,12 +43,11 @@ def scale_by_lra(
             preconditioner.
         b1: float, momentum parameter.
         nesterov: bool, whether to use Nesterov momentum.
-        update_global_norm_clip: optional float, clip updates by global norm.
-        update_elementwise_clip: bool, whether to clip updates to within [-1, 1].
         uvd_rank_of_approximation: int, rank of approximation for uvd preconditioner.
-        step_normalizer_order: str, '1st' or '2nd'.
         precond_lr: float or callable, learning rate for the preconditioner.
         precond_init_scale: optional float, initial scale for the preconditioner.
+        update_global_norm_clip: optional float, clip updates by global norm.
+        step_normalizer_order: str, '1st' or '2nd'.
         seed: Optional PRNGKey, random seed.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
             Defaults to the same dtype as the parameters.
@@ -204,8 +202,6 @@ def scale_by_lra(
             updates, _ = clipping.clip_by_global_norm(update_global_norm_clip).update(
                 updates, base.EmptyState
             )
-        if update_elementwise_clip:
-            updates = jax.tree.map(lambda x: jnp.clip(x, -1.0, 1.0), updates)
 
         mu = otu.tree_cast(mu, mu_dtype)
         state = PSGDLRAState(count=count_inc, key=key, mu=mu, U=U, V=V, d=d)
@@ -219,14 +215,13 @@ def low_rank_approximation(
     preconditioner_update_probability: float = 1.0,
     b1: float = 0.9,
     nesterov: bool = False,
-    update_global_norm_clip: Optional[float] = None,
-    update_elementwise_clip: bool = False,
     weight_decay: float = 0.0,
     mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
     uvd_rank_of_approximation: int = 10,
-    step_normalizer_order: str = "2nd",
     precond_lr: Union[float, Callable[[int], float]] = 0.1,
     precond_init_scale: Optional[float] = None,
+    update_global_norm_clip: Optional[float] = None,
+    step_normalizer_order: str = "2nd",
     seed: Optional[PRNGKey] = None,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
     precision: str = "tensorfloat32",
@@ -240,14 +235,13 @@ def low_rank_approximation(
             preconditioner.
         b1: float, momentum parameter.
         nesterov: bool, whether to use Nesterov momentum.
-        update_global_norm_clip: optional float, clip updates by global norm.
-        update_elementwise_clip: bool, whether to clip updates to within [-1, 1].
         weight_decay: float, weight decay.
         mask: optional mask for weight decay.
         uvd_rank_of_approximation: int, rank of approximation for uvd preconditioner.
-        step_normalizer_order: str, '1st' or '2nd'.
         precond_lr: float or callable, learning rate for the preconditioner.
         precond_init_scale: optional float, initial scale for the preconditioner.
+        update_global_norm_clip: optional float, clip updates by global norm.
+        step_normalizer_order: str, '1st' or '2nd'.
         seed: Optional PRNGKey, random seed.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
             Defaults to the same dtype as the parameters.
@@ -261,12 +255,11 @@ def low_rank_approximation(
             preconditioner_update_probability=preconditioner_update_probability,
             b1=b1,
             nesterov=nesterov,
-            update_global_norm_clip=update_global_norm_clip,
-            update_elementwise_clip=update_elementwise_clip,
             uvd_rank_of_approximation=uvd_rank_of_approximation,
-            step_normalizer_order=step_normalizer_order,
             precond_lr=precond_lr,
             precond_init_scale=precond_init_scale,
+            update_global_norm_clip=update_global_norm_clip,
+            step_normalizer_order=step_normalizer_order,
             seed=seed,
             mu_dtype=mu_dtype,
             precision=precision,

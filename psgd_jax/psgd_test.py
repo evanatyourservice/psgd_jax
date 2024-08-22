@@ -157,10 +157,10 @@ def main():
             learning_rate = optax.linear_schedule(4.0, 0.0, steps)
             kwargs = {
                 "learning_rate": learning_rate,
-                "b1": 0.0,
                 "preconditioner_update_probability": psgd_update_probability,
-                "update_global_norm_clip": 0.1,
+                "b1": 0.0,
                 "precond_lr": 0.1,
+                "update_global_norm_clip": 0.1,
             }
             if precond_type == "xmat":
                 optimizer = partial(xmat, **kwargs)
