@@ -14,6 +14,7 @@ from psgd_jax import hessian_helper
 from psgd_jax.xmat import xmat
 from psgd_jax.low_rank_approximation import low_rank_approximation
 from psgd_jax.affine import affine
+from psgd_jax.kron import kron
 
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
@@ -150,17 +151,20 @@ def _run_test(
 def main():
     print("Testing PSGD variants on Rosenbrock function")
 
-    for use_hessian in [True, False]:
-        for precond_type in ["xmat", "low_rank_approximation", "affine"]:
-            steps = 100
+    for use_hessian in [False, True]:
+        for precond_type in ["xmat", "low_rank_approximation", "affine", "kron"]:
+            if use_hessian and precond_type == "kron":
+                # kron just uses whitening (gg^T)
+                continue
+            steps = 500
             psgd_update_probability = 1.0
-            learning_rate = optax.linear_schedule(4.0, 0.0, steps)
+            learning_rate = optax.linear_schedule(0.1, 0.0, steps)
             kwargs = {
                 "learning_rate": learning_rate,
                 "preconditioner_update_probability": psgd_update_probability,
-                "b1": 0.0,
+                "b1": 0.9,
                 "precond_lr": 0.1,
-                "update_global_norm_clip": 0.1,
+                "update_global_norm_clip": np.sqrt(32.0),
             }
             if precond_type == "xmat":
                 optimizer = partial(xmat, **kwargs)
@@ -168,6 +172,10 @@ def main():
                 optimizer = partial(low_rank_approximation, **kwargs)
             elif precond_type == "affine":
                 optimizer = partial(affine, **kwargs)
+            elif precond_type == "kron":
+                del kwargs["precond_lr"]
+                del kwargs["update_global_norm_clip"]
+                optimizer = partial(kron, **kwargs)
             else:
                 optimizer = None
 

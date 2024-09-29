@@ -1,8 +1,21 @@
 # PSGD (Preconditioned Stochastic Gradient Descent)
 
-Implementation of [PSGD optimizer](https://github.com/lixilinx/psgd_torch) in JAX (optax-style). 
-PSGD is a second-order optimizer originally created by Xi-Lin Li that uses a hessian-based 
-preconditioner and lie groups to improve convergence, generalization, and efficiency.
+Implementations of [PSGD optimizers](https://github.com/lixilinx/psgd_torch) in JAX (optax-style). 
+PSGD is a second-order optimizer originally created by Xi-Lin Li that uses either a hessian-based 
+or whitening-based (gg^T) preconditioner and lie groups to improve training convergence, 
+generalization, and efficiency. I highly suggest taking a look at Xi-Lin's PSGD repo's readme linked
+to above for interesting details on how PSGD works and experiments using PSGD. There are also 
+paper resources listed near the bottom of this readme.
+
+### `kron`:
+
+The most versatile and easy-to-use PSGD optimizer is `kron`, which uses a 
+Kronecker-factored preconditioner. It has less hyperparameters that need tuning than adam, and can 
+be a drop-in replacement for adam. It keeps a dim's preconditioner as either triangular 
+or diagonal based on `max_size_triangular` and `max_skew_triangular`. For example, for a layer 
+with shape (256, 128, 64), triangular preconditioners would be shapes (256, 256), (128, 128), and 
+(64, 64) and diagonal preconditioners would be shapes (256,), (128,), and (64,). Depending on how 
+these two settings are chosen, `kron` can balance between memory/speed and performance (see below).
 
 
 ## Installation
@@ -11,10 +24,85 @@ preconditioner and lie groups to improve convergence, generalization, and effici
 pip install psgd-jax
 ```
 
-## Usage
+## Basic Usage (Kron)
 
-PSGD defaults to a gradient whitening type preconditioner (gg^T). In this case, you can use PSGD 
-like any other optax optimizer:
+For basic usage, use `kron` optimizer like any other optax optimizer:
+
+```python
+from psgd_jax.kron import kron
+
+optimizer = kron()
+opt_state = optimizer.init(params)
+
+updates, opt_state = opt.update(grads, opt_state)
+params = optax.apply_updates(params, updates)
+```
+
+**Basic hyperparameters:**
+
+In general kron is robust to hyperparameter choice.
+
+TLDR: Learning rate acts similarly to adam's, but can be set a little higher like 0.001 -> 
+0.003. Weight decay should be set lower than adam's, like 0.1 -> 0.01 or 0.001. There is no
+b2 or epsilon.
+
+`learning_rate`: Kron's learning rate acts similarly to adam's, but can withstand a higher 
+learning rate. Try setting 3x higher. If 0.001 was best for adam, try setting kron's to 0.003.
+
+`weight_decay`: PSGD does not rely on weight decay for generalization as much as adam, and too
+high weight decay can hurt performance. Try setting 10x lower. If the best weight decay for 
+adam was 0.1, you can set kron's to 0.01 or 0.001.
+
+`max_size_triangular`: Anything above this value will have a diagonal preconditioner, anything 
+below will have a triangular preconditioner. So if you have a dim with size 16,384 that you want 
+to use a diagonal preconditioner for, set `max_size_triangular` to something like 15,000. Default 
+is 8192.
+
+`max_skew_triangular`: Any tensor with skew above this value with make the larger dim diagonal.
+For example, with the default value for `max_skew_triangular` as 10, a bias layer of shape 
+(256,) would be diagonal because 256/1 > 10, and an embedding dim of shape (50000, 768) would 
+be (diag, tri) because 50000/768 is greater than 10. The default value of 10 usually makes 
+layers like bias, scale, and vocab embedding use diagonal with the rest as triangular.
+
+Interesting note: Setting `max_skew_triangular` to 0 will make all layers have (diag, tri) 
+preconditioners which uses slightly less memory than adam (and runs slightly faster). Setting 
+`max_size_triangular` to 0 will make all layers have diagonal preconditioners which uses the least 
+memory and runs the fastest, but training might be slower.
+
+See kron.py for more hyperparameter details.
+
+
+**Sharding:**
+
+Kron contains einsums, and in general the first axis of preconditioner matrices are the 
+contracting axes.
+
+If using only FSDP, I usually shard the last axis of each preconditioner matrix and call it good.
+
+However, if using tensor parallelism in addition to FSDP, you may think more carefully about how the preconditioners are sharded in train_state. For example, with grads of shape (256, 128) and kron 
+preconditioners of shapes (256, 256) and (128, 128), if the grads are sharded as (fsdp, tensor), 
+then you may want to shard the (256, 256) preconditioner as (fsdp, tensor) and the (128, 128) 
+preconditioner as (tensor, fsdp) so the grads and its preconditioners have same contraction axes. 
+Either way, though, a similar amount of allgathers and allreduces will take place so don't stress.
+
+
+**Scanned layers:**
+
+If you are scanning layers in your network, you can also have kron scan over these layers while updating 
+and applying the preconditioner. Simply pass in a pytree through `scanned_layers` with the same structure 
+as your params with bool values indicating which layers are scanned. PSGD will vmap over the first dims 
+of those layers. If you need a more advanced scanning setup, please open an issue.
+
+For very large models, the preconditioner update may use too much memory all at once, in which case 
+you can set `lax_map_scanned_layers` to `True` and set `lax_map_batch_size` to a reasonable batch size 
+for your setup (`lax.map` scans over batches of vmap).
+
+
+## Advanced Usage (XMat, LRA, Affine)
+
+Other forms of PSGD include XMat, LRA, and Affine. PSGD defaults to a gradient 
+whitening type preconditioner (gg^T). In this case, you can use PSGD like any other 
+optax optimizer:
 
 ```python
 import jax
@@ -67,7 +155,7 @@ while True:
 # yay
 ```
 
-However, PSGD is best used with a hessian vector product. If values are provided for PSGD's extra 
+However, PSGD can also be used with a hessian vector product. If values are provided for PSGD's extra 
 update function arguments `Hvp`, `vector`, and `update_preconditioner`, PSGD automatically 
 uses hessian-based preconditioning. `Hvp` is the hessian vector product, `vector` is the random 
 vector used to calculate the hessian vector product, and `update_preconditioner` is a boolean 
@@ -147,11 +235,19 @@ often, but convergence could be slower.
 
 ## PSGD variants
 
-`psgd_jax.xmat` `psgd_jax.low_rank_approximation` `psgd_jax.affine`
+`psgd_jax.kron` - `psgd_jax.xmat` - `psgd_jax.low_rank_approximation` - `psgd_jax.affine`
 
-There are three variants of PSGD: XMat, which uses an x-shaped global preconditioner, LRA, which 
-uses a low-rank approximation global preconditioner, and Affine, which uses block diagonal or 
-diagonal preconditioners.
+There are four variants of PSGD: Kron, which uses Kronecker-factored preconditioners for tensors
+of any number of dimensions, XMat, which uses an x-shaped global preconditioner, LRA, which uses 
+a low-rank approximation global preconditioner, and Affine, which uses kronecker-factored 
+preconditioners for matrices.
+
+**Kron:**
+
+Kron uses Kronecker-factored preconditioners for tensors of any number of dimensions. It's very 
+versatile, has less hyperparameters that need tuning than adam, can be a drop-in replacement for 
+adam, and can use more or less memory depending on how you set `max_size_triangular` and 
+`max_skew_triangular` (see above).
 
 **XMat:**
 
@@ -166,41 +262,8 @@ results. It has memory use of n_params * (2 * rank + 1) (n_params * (2 * rank) w
 **Affine:**
 
 Affine does not use global hessian information, but can be powerful nonetheless and possibly use 
-less memory than xmat or LRA. `max_size_triangular` and `max_skew_triangular` determine whether 
-a dimension's preconditioner is either block diagonal or diagonal.
-
-For example, if `max_size_triangular` is set to 512 and a layer's is shape (1024, 16, 64), the 
-preconditioner shapes will be [diag, block_diag, block_diag] or [(1024,), (16, 16), (64, 64)] 
-because 1024 > 512.
-
-If `max_skew_triangular` is set to 32 and a layer's shape is (1024, 3), 
-the preconditioner shapes will be [diag, block_diag] or [(1024,), (3, 3)] because 1024/3 is 
-greater than 32.
-
-If `max_size_triangular` and `max_skew_triangular` are set to 0, the affine preconditioners
-will be entirely diagonal and would use less memory than adam even with momentum.
-
-
-## Notes on sharding:
-
-For now PSGD does not explicitly handle any sharding, so intermediates would be handled naively by 
-JAX based on how users define in and out shardings. Our goal is to improve preconditioner shapes 
-and explicitly handle sharding for PSGD, especially for XMat and LRA, to make it more efficient
-in distributed settings.
-
-**Optimizer state shapes:**
-
-Momentum is always same shape as params.
-
-Affine might be the most out-of-the-box sharding friendly as it uses block diagonal or diagonal 
-preconditioners. For example, if a layer has shape (1024, 16, 64) and `max_size_triangular` is set 
-to 512, the preconditioner shapes will be `[(1024,), (16, 16), (64, 64)]`, which could be sharded as 
-the user sees fit.
-
-XMat's preconditioners `a` and `b` are both of shape `(n_params,)`. If n_params is odd, or not divisible 
-by number of devices, dummy params could be added before optimizer init and update.
-
-LRA's preconditioner shapes are `U=(n_params, rank)`, `V=(n_params, rank)`, and `d=(n_params, 1)`.
+less memory than xmat, LRA, or adam. `max_size_triangular` and `max_skew_triangular` determine whether 
+a dimension's preconditioner is triangular or diagonal. Affine and Kron are nearly identical for matrices.
 
 
 ## Resources
