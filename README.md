@@ -1,5 +1,9 @@
 # PSGD (Preconditioned Stochastic Gradient Descent)
 
+For original PSGD repo, see [psgd_torch](https://github.com/lixilinx/psgd_torch).
+
+For PyTorch Kron version, see [kron_torch](https://github.com/evanatyourservice/kron_torch).
+
 Implementations of [PSGD optimizers](https://github.com/lixilinx/psgd_torch) in JAX (optax-style). 
 PSGD is a second-order optimizer originally created by Xi-Lin Li that uses either a hessian-based 
 or whitening-based (gg^T) preconditioner and lie groups to improve training convergence, 
@@ -40,10 +44,8 @@ params = optax.apply_updates(params, updates)
 
 **Basic hyperparameters:**
 
-In general kron is robust to hyperparameter choice.
-
 TLDR: Learning rate acts similarly to adam's, but can be set a little higher like 0.001 -> 
-0.003. Weight decay should be set lower than adam's, like 0.1 -> 0.01 or 0.001. There is no
+0.003. Weight decay should be set lower than adam's, like 0.1 -> 0.03 or 0.01. There is no
 b2 or epsilon.
 
 `learning_rate`: Kron's learning rate acts similarly to adam's, but can withstand a higher 
@@ -51,7 +53,7 @@ learning rate. Try setting 3x higher. If 0.001 was best for adam, try setting kr
 
 `weight_decay`: PSGD does not rely on weight decay for generalization as much as adam, and too
 high weight decay can hurt performance. Try setting 10x lower. If the best weight decay for 
-adam was 0.1, you can set kron's to 0.01 or 0.001.
+adam was 0.1, you can set kron's to 0.03 or 0.01.
 
 `max_size_triangular`: Anything above this value will have a diagonal preconditioner, anything 
 below will have a triangular preconditioner. So if you have a dim with size 16,384 that you want 
@@ -69,6 +71,10 @@ preconditioners which uses slightly less memory than adam (and runs slightly fas
 `max_size_triangular` to 0 will make all layers have diagonal preconditioners which uses the least 
 memory and runs the fastest, but training might be slower.
 
+`preconditioner_update_probability`: Preconditioner update probability uses a schedule by default 
+that works well for most cases. It anneals from 1 to 0.03 at the beginning of training, so training 
+will be slightly slower at the start but will speed up to near adam's speed by around 3k steps.
+
 See kron.py for more hyperparameter details.
 
 
@@ -79,7 +85,8 @@ contracting axes.
 
 If using only FSDP, I usually shard the last axis of each preconditioner matrix and call it good.
 
-However, if using tensor parallelism in addition to FSDP, you may think more carefully about how the preconditioners are sharded in train_state. For example, with grads of shape (256, 128) and kron 
+However, if using tensor parallelism in addition to FSDP, you may think more carefully about how 
+the preconditioners are sharded in train_state. For example, with grads of shape (256, 128) and kron 
 preconditioners of shapes (256, 256) and (128, 128), if the grads are sharded as (fsdp, tensor), 
 then you may want to shard the (256, 256) preconditioner as (fsdp, tensor) and the (128, 128) 
 preconditioner as (tensor, fsdp) so the grads and its preconditioners have same contraction axes. 

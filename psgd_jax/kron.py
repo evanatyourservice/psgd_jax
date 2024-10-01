@@ -44,7 +44,6 @@ def scale_by_kron(
     ] = precond_update_prob_schedule(),
     max_size_triangular: int = 8192,
     max_skew_triangular: int = 10,
-    precond_lr: Union[float, Callable[[int], float]] = 0.1,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_dtype: Optional[Union[str, jnp.dtype]] = None,
     precision: str = "tensorfloat32",
@@ -61,7 +60,6 @@ def scale_by_kron(
             preconditioner. Default anneals from 1.0 to 0.03 by 4000 steps.
         max_size_triangular: int, max size for dim's preconditioner to be triangular.
         max_skew_triangular: int, max skew for dim's preconditioner to be triangular.
-        precond_lr: float or callable, learning rate for the preconditioner.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
             Defaults to the same dtype as the parameters.
         precond_dtype: optional str or jnp.dtype, dtype of the preconditioner.
@@ -80,6 +78,7 @@ def scale_by_kron(
     precond_dtype = canonicalize_dtype(precond_dtype)
 
     # some hardcoded settings
+    precond_lr = 0.1
     precond_init_scale = 0.1
     momentum_into_preconditioner = True
     integrate_out_v = False
@@ -318,7 +317,6 @@ def kron(
     ] = precond_update_prob_schedule(),
     max_size_triangular: int = 8192,
     max_skew_triangular: int = 10,
-    precond_lr: Union[float, Callable[[int], float]] = 0.1,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_dtype: Optional[Union[str, jnp.dtype]] = None,
     precision: str = "tensorfloat32",
@@ -338,7 +336,6 @@ def kron(
             preconditioner. Default anneals from 1.0 to 0.03 by 4000 steps.
         max_size_triangular: int, max size for dim's preconditioner to be triangular.
         max_skew_triangular: int, max skew for dim's preconditioner to be triangular.
-        precond_lr: float or callable, learning rate for the preconditioner.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
             Defaults to the same dtype as the parameters.
         precond_dtype: optional str or jnp.dtype, dtype of the preconditioner.
@@ -359,7 +356,6 @@ def kron(
             b1=b1,
             max_size_triangular=max_size_triangular,
             max_skew_triangular=max_skew_triangular,
-            precond_lr=precond_lr,
             mu_dtype=mu_dtype,
             precond_dtype=precond_dtype,
             precision=precision,
