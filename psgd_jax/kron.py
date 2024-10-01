@@ -174,10 +174,11 @@ def scale_by_kron(
             precond_lr_in = precond_lr(count_inc)
 
         # momentum
-        momentum_updates = updates
         mu = None
+        momentum_updates = updates
         if state["mu"] is not None:
-            momentum_updates, mu = _apply_momentum(updates, state["mu"], count_inc, b1)
+            mu = otu.tree_update_moment(updates, state["mu"], b1, 1)
+            momentum_updates = mu
 
         # flatten pytrees
         updates, grads_structure = jax.tree.flatten(updates)
@@ -368,14 +369,6 @@ def kron(
         opt.append(transform.add_decayed_weights(weight_decay, mask=mask))
     opt.append(transform.scale_by_learning_rate(learning_rate))
     return chain(*opt)
-
-
-def _apply_momentum(
-    updates: base.Updates, momentum: base.Updates, step, b1
-) -> Tuple[base.Updates, base.Updates]:
-    mu = otu.tree_update_moment(updates, momentum, b1, 1)
-    updates = otu.tree_bias_correction(mu, b1, step)
-    return updates, mu
 
 
 def _add_eps(x):
