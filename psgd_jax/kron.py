@@ -79,7 +79,7 @@ def scale_by_kron(
 
     # some hardcoded settings
     precond_lr = 0.1
-    precond_init_scale = 0.1
+    precond_init_scale = 1.0
     momentum_into_preconditioner = True
     integrate_out_v = False
 
