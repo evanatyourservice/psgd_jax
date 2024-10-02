@@ -105,7 +105,7 @@ def scale_by_kron(
         # momentum
         mu = None
         if b1 > 0:
-            mu = otu.tree_zeros_like(params, mu_dtype)
+            mu = jax.tree.map(lambda x: jnp.zeros_like(x, dtype=mu_dtype), params)
 
         # preconditioners
         Qs = [
