@@ -13,14 +13,9 @@ paper resources listed near the bottom of this readme.
 
 ### `kron`:
 
-The most versatile and easy-to-use PSGD optimizer is `kron`, which uses a 
-Kronecker-factored preconditioner. It has less hyperparameters that need tuning than adam, and can 
-be a drop-in replacement for adam. It keeps a dim's preconditioner as either triangular 
-or diagonal based on `max_size_triangular` and `max_skew_triangular`. For example, for a layer 
-with shape (256, 128, 64), triangular preconditioners would be shapes (256, 256), (128, 128), and 
-(64, 64) and diagonal preconditioners would be shapes (256,), (128,), and (64,). Depending on how 
-these two settings are chosen, `kron` can balance between memory/speed and performance (see below).
-
+The most versatile and easy-to-use PSGD optimizer is `kron`, which uses a Kronecker-factored 
+preconditioner. It has less hyperparameters that need tuning than adam, and can generally act as a 
+drop-in replacement for adam.
 
 ## Installation
 
@@ -50,14 +45,12 @@ params = optax.apply_updates(params, updates)
 
 TLDR: Learning rate and weight decay act similarly to adam, but lr might be able to be a little 
 higher like 0.001 -> 0.002 or 0.003, and weight decay might be best a little lower like 
-0.1 -> 0.05 or 0.03. There is no b2 or epsilon.
+0.1 -> 0.05 or 0.03. I'd start with adam's settings and go from there. There is no b2 or epsilon.
 
-`learning_rate`: Kron's learning rate acts similarly to adam's, but can withstand a higher 
-learning rate. Try setting 3x higher. If 0.001 was best for adam, try setting kron's to 0.003.
-
-`weight_decay`: PSGD does not rely on weight decay for generalization as much as adam, and too
-high weight decay can hurt performance. Try setting 3-10x lower. If the best weight decay for 
-adam was 0.1, you can set kron's to 0.03 or 0.01.
+These next settings control whether a dimension's preconditioner is diagonal or triangular. 
+For example, for a layer with shape (256, 128), triagular preconditioners would be shapes (256, 256)
+and (128, 128), and diagonal preconditioners would be shapes (256,) and (128,). Depending on how 
+these settings are chosen, `kron` can balance between memory/speed and effectiveness (see below).
 
 `max_size_triangular`: Anything above this value will have a diagonal preconditioner, anything 
 below will have a triangular preconditioner. So if you have a dim with size 16,384 that you want 
@@ -65,22 +58,33 @@ to use a diagonal preconditioner for, set `max_size_triangular` to something lik
 is 8192.
 
 `max_skew_triangular`: Any tensor with skew above this value with make the larger dim diagonal.
-For example, with the default value for `max_skew_triangular` as 10, a bias layer of shape 
-(256,) would be diagonal because 256/1 > 10, and an embedding dim of shape (50000, 768) would 
-be (diag, tri) because 50000/768 is greater than 10. The default value of 10 usually makes 
-layers like bias, scale, and vocab embedding use diagonal with the rest as triangular.
+For example, if `max_skew_triangular` = 10, a bias layer of shape (256,) would be diagonal 
+because 256/1 > 10, and an embedding layer with shape (50000, 768) would be (diag, tri) 
+because 50000/768 is greater than 10. The default value is 'inf'.
 
 `min_ndim_triangular`: Any tensor with less than this number of dims will have all diagonal 
-preconditioners. Default is 2, so single-dim tensors like bias and scale will use diagonal.
+preconditioners. Default is 2, so single-dim tensors like bias and scale will use diagonal
+preconditioners.
 
-Interesting note: Setting `max_skew_triangular` to 1 will make the largest dim have a diagonal 
-preconditioner and the rest have triangular, which usually uses slightly less memory than adam. 
-Setting `max_size_triangular` to 0 will make all layers have diagonal preconditioners which uses 
-the least memory and runs the fastest, but performance might be worse.
+Interesting setups using these settings:
+
+- Setting `max_size_triangular` to 0 will make all layers have diagonal preconditioners, which uses 
+very little memory and runs the fastest, but the optimizer might be less effective.
+
+- With `max_skew_triangular` set to 1, if a layer has one dim larger than the rest, it will use a diagonal 
+preconditioner. This setup usually results in less memory usage than adam, and is more performant 
+than having all diagonal preconditioners.
 
 `preconditioner_update_probability`: Preconditioner update probability uses a schedule by default 
 that works well for most cases. It anneals from 1 to 0.03 at the beginning of training, so training 
-will be slightly slower at the start but will speed up to near adam's speed by around 3k steps.
+will be slightly slower at the start but will speed up to near adam's speed by around 3k steps. PSGD 
+generally benefits from more preconditioner updates at the start of training, but once the preconditioner
+is learned it's okay to do them less often.
+
+This is the default schedule in the `precond_update_prob_schedule` function at the top of kron.py:
+
+<img src="assets/default_schedule.png" alt="Default Schedule" width="800" style="max-width: 100%; height: auto;" />
+
 
 See kron.py for more hyperparameter details.
 
@@ -109,7 +113,7 @@ of those layers. If you need a more advanced scanning setup, please open an issu
 
 For very large models, the preconditioner update may use too much memory all at once, in which case 
 you can set `lax_map_scanned_layers` to `True` and set `lax_map_batch_size` to a reasonable batch size 
-for your setup (`lax.map` scans over batches of vmap).
+for your setup (`lax.map` scans over batches of vmap, see JAX docs).
 
 
 ## Advanced Usage (XMat, LRA, Affine)
@@ -259,9 +263,8 @@ preconditioners for matrices.
 **Kron:**
 
 Kron uses Kronecker-factored preconditioners for tensors of any number of dimensions. It's very 
-versatile, has less hyperparameters that need tuning than adam, can be a drop-in replacement for 
-adam, and can use more or less memory depending on how you set `max_size_triangular` and 
-`max_skew_triangular` (see above).
+versatile, has less hyperparameters that need tuning than adam, and can generally act as a drop-in 
+replacement for adam.
 
 **XMat:**
 
