@@ -43,7 +43,8 @@ def scale_by_kron(
         float, Callable[[int], float]
     ] = precond_update_prob_schedule(),
     max_size_triangular: int = 8192,
-    max_skew_triangular: int = 10,
+    max_skew_triangular: int = float('inf'),
+    min_ndim_triangular: int = 2,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_dtype: Optional[Union[str, jnp.dtype]] = None,
     precision: str = "tensorfloat32",
@@ -60,6 +61,8 @@ def scale_by_kron(
             preconditioner. Default anneals from 1.0 to 0.03 by 4000 steps.
         max_size_triangular: int, max size for dim's preconditioner to be triangular.
         max_skew_triangular: int, max skew for dim's preconditioner to be triangular.
+        min_ndim_triangular: int, minimum number of dimensions a layer needs to have 
+            triangular preconditioners.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
             Defaults to the same dtype as the parameters.
         precond_dtype: optional str or jnp.dtype, dtype of the preconditioner.
@@ -114,6 +117,7 @@ def scale_by_kron(
                 precond_init_scale,
                 max_size_triangular,
                 max_skew_triangular,
+                min_ndim_triangular,
                 precond_dtype,
             )[0]
             for t, s in zip(jax.tree.leaves(params), jax.tree.leaves(scanned_layers_))
@@ -193,6 +197,7 @@ def scale_by_kron(
                 precond_init_scale,
                 max_size_triangular,
                 max_skew_triangular,
+                min_ndim_triangular,
                 precond_dtype,
                 existing_Q=jax.tree.map(lambda d: d[0], Q) if s else Q,
             )
@@ -317,7 +322,8 @@ def kron(
         float, Callable[[int], float]
     ] = precond_update_prob_schedule(),
     max_size_triangular: int = 8192,
-    max_skew_triangular: int = 10,
+    max_skew_triangular: int = float('inf'),
+    min_ndim_triangular: int = 2,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_dtype: Optional[Union[str, jnp.dtype]] = None,
     precision: str = "tensorfloat32",
@@ -337,6 +343,8 @@ def kron(
             preconditioner. Default anneals from 1.0 to 0.03 by 4000 steps.
         max_size_triangular: int, max size for dim's preconditioner to be triangular.
         max_skew_triangular: int, max skew for dim's preconditioner to be triangular.
+        min_ndim_triangular: int, minimum number of dimensions a layer needs to have
+            triangular preconditioners.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
             Defaults to the same dtype as the parameters.
         precond_dtype: optional str or jnp.dtype, dtype of the preconditioner.
@@ -357,6 +365,7 @@ def kron(
             b1=b1,
             max_size_triangular=max_size_triangular,
             max_skew_triangular=max_skew_triangular,
+            min_ndim_triangular=min_ndim_triangular,
             mu_dtype=mu_dtype,
             precond_dtype=precond_dtype,
             precision=precision,
@@ -424,7 +433,7 @@ def _norm_lower_bound(A: jax.Array):
     return jax.lax.cond(max_abs > 0, calc, no_calc, A)
 
 
-def _init_Q_exprs(t, scale, max_size, max_skew, dtype, existing_Q=None):
+def _init_Q_exprs(t, scale, max_size, max_skew, min_ndim_triangular, dtype, existing_Q=None):
     """
     For a scalar or tensor `t`, we initialize its preconditioner `Q` and reusable
     contraction expressions for updating `Q` and preconditioning gradient.
@@ -476,7 +485,12 @@ def _init_Q_exprs(t, scale, max_size, max_skew, dtype, existing_Q=None):
         # used for getting the subscripts for exprP
         piece1P, piece2P, piece3P, piece4P = ([], [], "", "")
         for i, size in enumerate(shape):
-            if size == 1 or size > max_size or size > max_skew * beta_size:
+            if (
+                size == 1
+                or size > max_size
+                or size > max_skew * beta_size
+                or len(shape) < min_ndim_triangular
+            ):
                 # use diagonal matrix as preconditioner for this dim
                 if existing_Q is None:
                     Q.append(scale * jnp.ones(size, dtype=dtype))
