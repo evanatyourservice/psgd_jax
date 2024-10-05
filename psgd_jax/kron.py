@@ -43,7 +43,7 @@ def scale_by_kron(
         float, Callable[[int], float]
     ] = precond_update_prob_schedule(),
     max_size_triangular: int = 8192,
-    max_skew_triangular: int = float('inf'),
+    max_skew_triangular: float = float('inf'),
     min_ndim_triangular: int = 2,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_dtype: Optional[Union[str, jnp.dtype]] = None,
@@ -60,7 +60,7 @@ def scale_by_kron(
         preconditioner_update_probability: float, probability of updating the
             preconditioner. Default anneals from 1.0 to 0.03 by 4000 steps.
         max_size_triangular: int, max size for dim's preconditioner to be triangular.
-        max_skew_triangular: int, max skew for dim's preconditioner to be triangular.
+        max_skew_triangular: float, max skew for dim's preconditioner to be triangular.
         min_ndim_triangular: int, minimum number of dimensions a layer needs to have 
             triangular preconditioners.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
