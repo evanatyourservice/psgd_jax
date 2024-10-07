@@ -1,4 +1,4 @@
-from typing import Any, List, Optional, Union, Callable, Tuple
+from typing import Any, List, Optional, Union, Callable
 from functools import partial
 
 import jax
@@ -43,7 +43,7 @@ def scale_by_kron(
         float, Callable[[int], float]
     ] = precond_update_prob_schedule(),
     max_size_triangular: int = 8192,
-    max_skew_triangular: float = float('inf'),
+    max_skew_triangular: float = float("inf"),
     min_ndim_triangular: int = 2,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_dtype: Optional[Union[str, jnp.dtype]] = None,
@@ -61,7 +61,7 @@ def scale_by_kron(
             preconditioner. Default anneals from 1.0 to 0.03 by 4000 steps.
         max_size_triangular: int, max size for dim's preconditioner to be triangular.
         max_skew_triangular: float, max skew for dim's preconditioner to be triangular.
-        min_ndim_triangular: int, minimum number of dimensions a layer needs to have 
+        min_ndim_triangular: int, minimum number of dimensions a layer needs to have
             triangular preconditioners.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
             Defaults to the same dtype as the parameters.
@@ -84,10 +84,9 @@ def scale_by_kron(
     precond_lr = 0.1
     precond_init_scale = 1.0
     momentum_into_preconditioner = True
-    integrate_out_v = False
 
     def map_fn(do_map, fn, *args):
-        """Maybe map a fn along axes."""
+        """Maybe map a fn along first axis."""
         if do_map:
             if lax_map_scanned_layers:
                 return jax.lax.map(
@@ -212,44 +211,12 @@ def scale_by_kron(
                 else:
                     precond_updates_in = updates
 
-                if integrate_out_v:
-                    Vs = [None for _ in precond_updates_in]
-                else:
-                    # random vectors
-                    key, subkey = jax.random.split(key)
-                    Vs_keys = jax.random.split(subkey, len(precond_updates_in))
-                    Vs = [
-                        jax.random.normal(k, shape=g.shape, dtype=g.dtype)
-                        for k, g in zip(Vs_keys, precond_updates_in)
-                    ]
-
-                # form conjB or invQhinvQ
-                conjB_or_invQhinvQ = [
-                    map_fn(s, _conjB_or_invQhinvQ, Q, g, v)
-                    for s, Q, g, v in zip(scanned_layers_, Qs, precond_updates_in, Vs)
-                ]
-
-                # update Qs
-                new_Qs = [
-                    map_fn(
-                        s,
-                        partial(
-                            _update_Q,
-                            exprs=exprs,
-                            precond_lr=precond_lr_in,
-                            integrate_out_v=integrate_out_v,
-                        ),
-                        Q,
-                        g,
-                        c_or_i,
-                    )
-                    for s, exprs, Q, g, c_or_i in zip(
-                        scanned_layers_,
-                        expressions,
-                        Qs,
-                        precond_updates_in,
-                        conjB_or_invQhinvQ,
-                    )
+                # random vectors
+                key, subkey = jax.random.split(key)
+                Vs_keys = jax.random.split(subkey, len(precond_updates_in))
+                Vs = [
+                    jax.random.normal(k, shape=g.shape, dtype=g.dtype)
+                    for k, g in zip(Vs_keys, precond_updates_in)
                 ]
 
                 # maybe balance preconditioners (useful for quantization/low precision)
@@ -268,7 +235,27 @@ def scale_by_kron(
 
                 key, subkey = jax.random.split(key)
                 do_balances = jax.random.uniform(subkey) < 0.01
-                new_Qs = jax.lax.cond(do_balances, balance_Qs, lambda qs: qs, new_Qs)
+                Qs = jax.lax.cond(do_balances, balance_Qs, lambda qs: qs, Qs)
+
+                # form conjB
+                conjBs = [
+                    map_fn(s, _conjB, Q, g, v)
+                    for s, Q, g, v in zip(scanned_layers_, Qs, precond_updates_in, Vs)
+                ]
+
+                # update Qs
+                new_Qs = [
+                    map_fn(
+                        s,
+                        partial(_update_Q, exprs=exprs, precond_lr=precond_lr_in),
+                        Q,
+                        g,
+                        c_or_i,
+                    )
+                    for s, exprs, Q, g, c_or_i in zip(
+                        scanned_layers_, expressions, Qs, precond_updates_in, conjBs
+                    )
+                ]
 
                 new_Qs = otu.tree_cast(new_Qs, precond_dtype)
                 return new_Qs
@@ -322,7 +309,7 @@ def kron(
         float, Callable[[int], float]
     ] = precond_update_prob_schedule(),
     max_size_triangular: int = 8192,
-    max_skew_triangular: int = float('inf'),
+    max_skew_triangular: int = float("inf"),
     min_ndim_triangular: int = 2,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_dtype: Optional[Union[str, jnp.dtype]] = None,
@@ -433,7 +420,9 @@ def _norm_lower_bound(A: jax.Array):
     return jax.lax.cond(max_abs > 0, calc, no_calc, A)
 
 
-def _init_Q_exprs(t, scale, max_size, max_skew, min_ndim_triangular, dtype, existing_Q=None):
+def _init_Q_exprs(
+    t, scale, max_size, max_skew, min_ndim_triangular, dtype, existing_Q=None
+):
     """
     For a scalar or tensor `t`, we initialize its preconditioner `Q` and reusable
     contraction expressions for updating `Q` and preconditioning gradient.
@@ -603,15 +592,6 @@ def _solve_triangular(A, B, upper, left=True):
     return solve_fn(A, B)
 
 
-def _triangular_inv(A):
-    """Compute inv(A).
-
-    A triangular solve has roughly the same complexity as a matmul.
-    """
-    I = jnp.eye(A.shape[0], dtype=A.dtype)
-    return _solve_triangular(A, I, upper=True)
-
-
 def _solve_triangular_right(X, A):
     """Compute X @ inv(A).
 
@@ -623,50 +603,30 @@ def _solve_triangular_right(X, A):
         return _solve_triangular(A, X[None, :], upper=True, left=False)[0]
 
 
-def _conjB_or_invQhinvQ(Q, G, V):
-    """Compute conjB or trace(inv(Q).H @ inv(Q)) depending on V."""
-    if V is not None:
-        order = G.ndim
-        p = list(range(order))
-        # permute dims like [0,1,2,3,4] -> [1,2,3,4,0]
-        conjB = jnp.transpose(V.conj(), p[1:] + p[:1])
-        for i, q in enumerate(Q):
-            conjB = conjB / q if q.ndim < 2 else _solve_triangular_right(conjB, q)
-            if i < order - 1:
-                # transpose dims like
-                # [1,2,3,4,0]->[0,2,3,4,1]->[0,1,3,4,2]->[0,1,2,4,3]->[0,1,2,3,4]
-                conjB = jnp.swapaxes(conjB, i, order - 1)
-        return conjB
-    else:
-        # V is integrated out, no need to form conjB
-        invQ = [1 / q if q.ndim < 2 else _triangular_inv(q) for q in Q]
-        invQhinvQ = [q.conj() * q if q.ndim < 2 else q.conj().T @ q for q in invQ]
-        return invQhinvQ
+def _conjB(Q, G, V):
+    """Compute conjB."""
+    order = G.ndim
+    p = list(range(order))
+    conjB = jnp.transpose(V.conj(), p[1:] + p[:1])
+    for i, q in enumerate(Q):
+        conjB = conjB / q if q.ndim < 2 else _solve_triangular_right(conjB, q)
+        if i < order - 1:
+            conjB = jnp.swapaxes(conjB, i, order - 1)
+    return conjB
 
 
-def _update_Q(Q, G, conjB_or_invQhinvQ, exprs, precond_lr, integrate_out_v):
+def _update_Q(Q, G, conjB, exprs, precond_lr):
     """Compute A and update Q."""
     exprA, exprGs, _ = exprs
 
     A = exprA(*Q, G, backend="jax")
+
     A_conj = A.conj()
-    if integrate_out_v:
-        invQhinvQ = conjB_or_invQhinvQ
-        trace_invQhinvQ = [
-            jnp.sum(q) if q.ndim < 2 else jnp.trace(q) for q in invQhinvQ
-        ]
-    else:
-        conjB = conjB_or_invQhinvQ
-        conjB_conj = conjB.conj()
+    conjB_conj = conjB.conj()
 
     def _update_single_q(i, q):
         term1 = exprGs[i](A, A_conj)
-        if integrate_out_v:
-            term2 = 1.0
-            for j, trace in enumerate(trace_invQhinvQ):
-                term2 = term2 * (trace if i != j else invQhinvQ[i])
-        else:
-            term2 = exprGs[i](conjB_conj, conjB)
+        term2 = exprGs[i](conjB_conj, conjB)
 
         if q.ndim < 2:
             q -= (
