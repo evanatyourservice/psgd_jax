@@ -152,7 +152,7 @@ def main():
     print("Testing PSGD variants on Rosenbrock function")
 
     for use_hessian in [False, True]:
-        for precond_type in ["xmat", "low_rank_approximation", "affine", "kron"]:
+        for precond_type in ["kron", "xmat", "low_rank_approximation", "affine"]:
             if use_hessian and precond_type == "kron":
                 # kron just uses whitening (gg^T)
                 continue

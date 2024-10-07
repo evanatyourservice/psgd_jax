@@ -1,10 +1,10 @@
 from typing import Any, List, Optional, Union, Callable
 from functools import partial
+import string
 
 import jax
 from jax import vmap
 import jax.numpy as jnp
-import opt_einsum
 from optax import tree_utils as otu
 from optax._src import base, transform
 from optax._src.linear_algebra import global_norm
@@ -247,7 +247,7 @@ def scale_by_kron(
                 new_Qs = [
                     map_fn(
                         s,
-                        partial(_update_Q, exprs=exprs, precond_lr=precond_lr_in),
+                        partial(_update_precond, exprs=exprs, precond_lr=precond_lr_in),
                         Q,
                         g,
                         c_or_i,
@@ -269,7 +269,7 @@ def scale_by_kron(
 
         # precondition gradients
         precond_gs = [
-            map_fn(s, partial(_precond_grad_kron_math, exprs=exprs), Q, g)
+            map_fn(s, partial(_precond_grad, exprs=exprs), Q, g)
             for s, exprs, Q, g in zip(
                 scanned_layers_, expressions, Qs, momentum_updates
             )
@@ -423,27 +423,11 @@ def _norm_lower_bound(A: jax.Array):
 def _init_Q_exprs(
     t, scale, max_size, max_skew, min_ndim_triangular, dtype, existing_Q=None
 ):
+    """For a scalar or tensor `t`, we initialize its preconditioner `Q` and 
+    reusable contraction expressions for updating `Q` and preconditioning gradient.
     """
-    For a scalar or tensor `t`, we initialize its preconditioner `Q` and reusable
-    contraction expressions for updating `Q` and preconditioning gradient.
+    letters = string.ascii_lowercase + string.ascii_uppercase
 
-    1, Preconditioner `Q` is initialized to
-    `Q = scale * I = scale * kron(eye(t.shape[0]), eye(t.shape[1]), ...)`
-    where the `eye(.)` may be replaced with `diag(ones(.))` if that dim is too large,
-    determined by `max_size` and `max_skew`.
-
-    2, A series of einsum contract expressions. The following subscript examples are for
-    a 5th order tensor.
-        2.1, `exprA` is the expression for calculating `A`, e.g.,
-            `'aA,bB,cC,dD,eE,ABCDE->abcde'`
-        2.2, `exprGs` is a list of expressions for calculating the gradients wrt `Q`
-            on each dim, e.g., `'abCde,abγde->Cγ'` for the middle dim of a 5th order
-            tensor `Q`.
-        2.3, `exprP` is the expression for calculating the preconditioned gradient,
-            e.g., `'aA,bB,cC,dD,eE,aα,bβ,cγ,dδ,eε,αβγδε->ABCDE'`
-
-    If `existing_Q` is passed in, only expressions are returned.
-    """
     shape = t.shape
     if len(shape) == 0:  # scalar
         Q = (
@@ -451,14 +435,13 @@ def _init_Q_exprs(
             if existing_Q is None
             else existing_Q
         )
-        exprA = opt_einsum.contract_expression(",->", Q[0].shape, t.shape)
-        exprP = opt_einsum.contract_expression(",,->", Q[0].shape, Q[0].shape, t.shape)
-        exprGs = [opt_einsum.contract_expression(",->", t.shape, t.shape)]
+        exprA = ",->,"
+        exprP = ",,->,"
+        exprGs = [",->"]
     else:  # tensor
-        if len(shape) > 26:
+        if len(shape) > 13:
             raise ValueError(
-                f"Got tensor with dim {len(t.shape)}; Einstein runs out of letters; "
-                "Replace 26 with larger numbers!"
+                f"Got tensor with dim {len(t.shape)}; Einstein runs out of letters!"
             )
 
         scale = scale ** (1 / len(shape))
@@ -469,9 +452,7 @@ def _init_Q_exprs(
 
         Q = [] if existing_Q is None else existing_Q
         exprGs = []
-        # used for getting the subscripts for exprA
         piece1A, piece2A, piece3A = ([], "", "")
-        # used for getting the subscripts for exprP
         piece1P, piece2P, piece3P, piece4P = ([], [], "", "")
         for i, size in enumerate(shape):
             if (
@@ -484,45 +465,33 @@ def _init_Q_exprs(
                 if existing_Q is None:
                     Q.append(scale * jnp.ones(size, dtype=dtype))
 
-                piece1A.append(opt_einsum.get_symbol(i))
-                piece2A = piece2A + opt_einsum.get_symbol(i)
-                piece3A = piece3A + opt_einsum.get_symbol(i)
+                piece1A.append(letters[i])
+                piece2A = piece2A + letters[i]
+                piece3A = piece3A + letters[i]
 
-                piece1P.append(opt_einsum.get_symbol(i + 26))
-                piece2P.append(opt_einsum.get_symbol(i + 26))
-                piece3P = piece3P + opt_einsum.get_symbol(i + 26)
-                piece4P = piece4P + opt_einsum.get_symbol(i + 26)
+                piece1P.append(letters[i + 13])
+                piece2P.append(letters[i + 13])
+                piece3P = piece3P + letters[i + 13]
+                piece4P = piece4P + letters[i + 13]
 
                 piece1 = "".join(
                     [
-                        (
-                            opt_einsum.get_symbol(i + 26)
-                            if j == i
-                            else opt_einsum.get_symbol(j)
-                        )
+                        (letters[j + 13] if j == i else letters[j])
                         for j in range(len(shape))
                     ]
                 )
-                subscripts = (
-                    piece1 + "," + piece1 + "->" + opt_einsum.get_symbol(i + 26)
-                )
-                exprGs.append(
-                    opt_einsum.contract_expression(subscripts, t.shape, t.shape)
-                )
+                subscripts = piece1 + "," + piece1 + "->" + letters[i + 13]
+                exprGs.append(subscripts)
             else:
                 # use triangular matrix as preconditioner for this dim
                 if existing_Q is None:
                     Q.append(scale * jnp.eye(size, dtype=dtype))
 
-                piece1A.append(opt_einsum.get_symbol(i) + opt_einsum.get_symbol(i + 26))
-                piece2A = piece2A + opt_einsum.get_symbol(i + 26)
-                piece3A = piece3A + opt_einsum.get_symbol(i)
+                piece1A.append(letters[i] + letters[i + 13])
+                piece2A = piece2A + letters[i + 13]
+                piece3A = piece3A + letters[i]
 
-                a, b, c = (
-                    opt_einsum.get_symbol(i),
-                    opt_einsum.get_symbol(i + 26),
-                    opt_einsum.get_symbol(i + 805),
-                )
+                a, b, c = (letters[i], letters[i + 13], letters[i + 26])
                 piece1P.append(a + b)
                 piece2P.append(a + c)
                 piece3P = piece3P + c
@@ -530,46 +499,24 @@ def _init_Q_exprs(
 
                 piece1 = "".join(
                     [
-                        (
-                            opt_einsum.get_symbol(i + 26)
-                            if j == i
-                            else opt_einsum.get_symbol(j)
-                        )
+                        (letters[j + 13] if j == i else letters[j])
                         for j in range(len(shape))
                     ]
                 )
                 piece2 = "".join(
                     [
-                        (
-                            opt_einsum.get_symbol(i + 805)
-                            if j == i
-                            else opt_einsum.get_symbol(j)
-                        )
+                        (letters[j + 26] if j == i else letters[j])
                         for j in range(len(shape))
                     ]
                 )
                 subscripts = (
-                    piece1
-                    + ","
-                    + piece2
-                    + "->"
-                    + opt_einsum.get_symbol(i + 26)
-                    + opt_einsum.get_symbol(i + 805)
+                    piece1 + "," + piece2 + "->" + letters[i + 13] + letters[i + 26]
                 )
-                exprGs.append(
-                    opt_einsum.contract_expression(subscripts, t.shape, t.shape)
-                )
+                exprGs.append(subscripts)
 
-        subscripts = ",".join(piece1A) + "," + piece2A + "->" + piece3A
-        exprA = opt_einsum.contract_expression(
-            subscripts, *[q.shape for q in Q], t.shape
-        )
-
-        subscripts = (
+        exprA = ",".join(piece1A) + "," + piece2A + "->" + piece3A
+        exprP = (
             ",".join(piece1P) + "," + ",".join(piece2P) + "," + piece3P + "->" + piece4P
-        )
-        exprP = opt_einsum.contract_expression(
-            subscripts, *[q.shape for q in Q], *[q.shape for q in Q], t.shape
         )
 
     exprGs = tuple(exprGs)
@@ -615,18 +562,18 @@ def _conjB(Q, G, V):
     return conjB
 
 
-def _update_Q(Q, G, conjB, exprs, precond_lr):
+def _update_precond(Q, G, conjB, exprs, precond_lr):
     """Compute A and update Q."""
     exprA, exprGs, _ = exprs
 
-    A = exprA(*Q, G, backend="jax")
+    A = jnp.einsum(exprA, *Q, G)
 
     A_conj = A.conj()
     conjB_conj = conjB.conj()
 
     def _update_single_q(i, q):
-        term1 = exprGs[i](A, A_conj)
-        term2 = exprGs[i](conjB_conj, conjB)
+        term1 = jnp.einsum(exprGs[i], A, A_conj)
+        term2 = jnp.einsum(exprGs[i], conjB_conj, conjB)
 
         if q.ndim < 2:
             q -= (
@@ -647,7 +594,7 @@ def _update_Q(Q, G, conjB, exprs, precond_lr):
     return [_update_single_q(i, q) for i, q in enumerate(Q)]
 
 
-def _precond_grad_kron_math(Q, G, exprs):
+def _precond_grad(Q, G, exprs):
     """Precondition gradient G with preconditioner Q."""
     exprP = exprs[-1]
-    return exprP(*[q.conj() for q in Q], *Q, G, backend="jax")
+    return jnp.einsum(exprP, *[q.conj() for q in Q], *Q, G)
