@@ -175,6 +175,7 @@ def main():
             elif precond_type == "kron":
                 del kwargs["precond_lr"]
                 del kwargs["update_global_norm_clip"]
+                kwargs["buffer_q_q_conj"] = True
                 optimizer = partial(kron, **kwargs)
             else:
                 optimizer = None
@@ -182,7 +183,7 @@ def main():
             plot_title = f"{precond_type} PSGD {'Hvp' if use_hessian else 'gg^T'}"
             print(plot_title)
 
-            seed = np.random.randint(0, 2**30)
+            seed = 10  # np.random.randint(0, 2**30)
 
             params = _make_params(jax.random.PRNGKey(seed))
 
