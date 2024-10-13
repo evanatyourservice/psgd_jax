@@ -74,11 +74,6 @@ very little memory and runs the fastest, but the optimizer might be less effecti
 preconditioner. This setup usually results in less memory usage than adam, and is more performant 
 than having all diagonal preconditioners.
 
-`buffer_q_q_conj` This buffers Q @ Q.conj() to make preconditioning the grads more than twice as light
-compute-wise for the cost of a second preconditioner buffer kept in memory. This is very useful if 
-you're not very memory bound and compute efficiency is important. With fully triangular preconditioners and 
-this set to True, Kron uses the most amount of memory it can and roughly equals shampoo's memory use.
-
 `preconditioner_update_probability`: Preconditioner update probability uses a schedule by default 
 that works well for most cases. It anneals from 1 to 0.03 at the beginning of training, so training 
 will be slightly slower at the start but will speed up to near adam's speed by around 3k steps. PSGD 

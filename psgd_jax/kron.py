@@ -51,7 +51,6 @@ def scale_by_kron(
     scanned_layers: Optional[base.Params] = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
-    buffer_q_q_conj: bool = False,
 ) -> base.GradientTransformationExtraArgs:
     """
     Implements PSGD Kron from https://github.com/lixilinx/psgd_torch.
@@ -74,9 +73,6 @@ def scale_by_kron(
         lax_map_scanned_layers: bool, whether to use lax.map for scanned layers
             instead of vmap. Useful to save memory with large models.
         lax_map_batch_size: int, batch size for lax.map, see JAX docs for more info.
-        buffer_q_q_conj: bool, whether to buffer Q @ Q.conj() to reduce a fair bit of
-            compute while preconditioning the grads in exchange for a second preconditioner
-            buffer.
 
     Returns:
         optax.GradientTransformationExtraArgs
@@ -122,7 +118,6 @@ def scale_by_kron(
                 max_skew_triangular,
                 min_ndim_triangular,
                 precond_dtype,
-                buffer_q_q_conj,
             )[0]
             for t, s in zip(jax.tree.leaves(params), jax.tree.leaves(scanned_layers_))
         ]
@@ -146,9 +141,6 @@ def scale_by_kron(
         Qs_size_MB = sum(
             [q.size * q.dtype.itemsize / (2**20) for q in jax.tree.leaves(Qs)]
         )
-        if buffer_q_q_conj:
-            Qs_n_elements *= 2
-            Qs_size_MB *= 2
         if jax.process_index() == 0:
             print(
                 f"PSGD Preconditioners size: {Qs_n_elements} elements, "
@@ -165,11 +157,7 @@ def scale_by_kron(
                 )
 
         # initial state
-        state = dict(count=jnp.zeros([], jnp.int32), mu=mu, Qs_preconditioners=Qs)
-        if buffer_q_q_conj:
-            state["q_q_conj"] = jax.tree.map(lambda q: jnp.zeros_like(q), Qs)
-
-        return state
+        return dict(count=jnp.zeros([], jnp.int32), mu=mu, Qs_preconditioners=Qs)
 
     def update_fn(updates: base.Updates, state: dict, params: base.Params = None):
         del params
@@ -200,8 +188,6 @@ def scale_by_kron(
         momentum_updates = grads_structure.flatten_up_to(momentum_updates)
         Qs = grads_structure.flatten_up_to(state["Qs_preconditioners"])
         scanned_layers_ = grads_structure.flatten_up_to(scanned_layers_)
-        if buffer_q_q_conj:
-            q_q_conj = grads_structure.flatten_up_to(state["q_q_conj"])
 
         # get einsum expressions
         expressions = [
@@ -212,7 +198,6 @@ def scale_by_kron(
                 max_skew_triangular,
                 min_ndim_triangular,
                 precond_dtype,
-                buffer_q_q_conj,
                 existing_Q=jax.tree.map(lambda d: d[0], Q) if s else Q,
             )
             for t, s, Q in zip(updates, scanned_layers_, Qs)
@@ -259,56 +244,34 @@ def scale_by_kron(
                 ]
 
                 # update Qs
-                Qs = [
+                new_Qs = [
                     map_fn(
                         s,
-                        partial(
-                            _update_precond,
-                            exprs=exprs,
-                            precond_lr=precond_lr_in,
-                            buffer_q_q_conj=buffer_q_q_conj,
-                        ),
+                        partial(_update_precond, exprs=exprs, precond_lr=precond_lr_in),
                         Q,
                         g,
-                        conjB,
+                        c_or_i,
                     )
-                    for s, exprs, Q, g, conjB in zip(
+                    for s, exprs, Q, g, c_or_i in zip(
                         scanned_layers_, expressions, Qs, precond_updates_in, conjBs
                     )
                 ]
 
-                Qs = otu.tree_cast(Qs, precond_dtype)
-                if buffer_q_q_conj:
-                    Qs, q_q_conj = zip(*Qs)
-                    Qs = list(Qs)
-                    q_q_conj = list(q_q_conj)
-                    return Qs, q_q_conj
-                return Qs
-
-        def skip(_, Qs):
-            if buffer_q_q_conj:
-                return Qs, q_q_conj
-            return Qs
+                new_Qs = otu.tree_cast(new_Qs, precond_dtype)
+                return new_Qs
 
         key, subkey = jax.random.split(key)
         do_update = jax.random.uniform(subkey, dtype=jnp.float32) < update_prob_in
         key, subkey = jax.random.split(key)
-        Qs = jax.lax.cond(do_update, update_preconditioner, skip, subkey, Qs)
-        precond_in = Qs
-        if buffer_q_q_conj:
-            Qs, q_q_conj = Qs
-            precond_in = q_q_conj
+        Qs = jax.lax.cond(
+            do_update, update_preconditioner, lambda _, qs: qs, subkey, Qs
+        )
 
         # precondition gradients
         precond_gs = [
-            map_fn(
-                s,
-                partial(_precond_grad, exprs=exprs, buffer_q_q_conj=buffer_q_q_conj),
-                Q,
-                g,
-            )
+            map_fn(s, partial(_precond_grad, exprs=exprs), Q, g)
             for s, exprs, Q, g in zip(
-                scanned_layers_, expressions, precond_in, momentum_updates
+                scanned_layers_, expressions, Qs, momentum_updates
             )
         ]
 
@@ -331,10 +294,6 @@ def scale_by_kron(
         mu = otu.tree_cast(mu, mu_dtype)
         Qs = otu.tree_cast(Qs, precond_dtype)
         state = dict(count=count_inc, mu=mu, Qs_preconditioners=Qs)
-        if buffer_q_q_conj:
-            q_q_conj = grads_structure.unflatten(q_q_conj)
-            q_q_conj = otu.tree_cast(q_q_conj, precond_dtype)
-            state["q_q_conj"] = q_q_conj
 
         return updates, state
 
@@ -358,7 +317,6 @@ def kron(
     scanned_layers: Optional[base.Params] = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
-    buffer_q_q_conj: bool = False,
 ) -> base.GradientTransformationExtraArgs:
     """
     Implements PSGD Kron from https://github.com/lixilinx/psgd_torch.
@@ -384,9 +342,6 @@ def kron(
         lax_map_scanned_layers: bool, whether to use lax.map for scanned layers
             instead of vmap. Useful to save memory with large models.
         lax_map_batch_size: int, batch size for lax.map, see JAX docs for more info.
-        buffer_q_q_conj: bool, whether to buffer Q @ Q.conj() to reduce a fair bit of
-            compute during preconditioning the grads in exchange for a second preconditioner
-            buffer.
 
     Returns:
         optax.GradientTransformationExtraArgs
@@ -404,7 +359,6 @@ def kron(
             scanned_layers=scanned_layers,
             lax_map_scanned_layers=lax_map_scanned_layers,
             lax_map_batch_size=lax_map_batch_size,
-            buffer_q_q_conj=buffer_q_q_conj,
         )
     ]
     if weight_decay > 0:
@@ -467,16 +421,9 @@ def _norm_lower_bound(A: jax.Array):
 
 
 def _init_Q_exprs(
-    t,
-    scale,
-    max_size,
-    max_skew,
-    min_ndim_triangular,
-    dtype,
-    buffer_q_q_conj,
-    existing_Q=None,
+    t, scale, max_size, max_skew, min_ndim_triangular, dtype, existing_Q=None
 ):
-    """For a scalar or tensor `t`, we initialize its preconditioner `Q` and
+    """For a scalar or tensor `t`, we initialize its preconditioner `Q` and 
     reusable contraction expressions for updating `Q` and preconditioning gradient.
     """
     letters = string.ascii_lowercase + string.ascii_uppercase
@@ -489,11 +436,8 @@ def _init_Q_exprs(
             else existing_Q
         )
         exprA = ",->,"
+        exprP = ",,->,"
         exprGs = [",->"]
-        if buffer_q_q_conj:
-            exprP = ",->,"
-        else:
-            exprP = ",,->,"
     else:  # tensor
         if len(shape) > 13:
             raise ValueError(
@@ -507,8 +451,8 @@ def _init_Q_exprs(
             beta_size = sorted(list(shape))[-2]
 
         Q = [] if existing_Q is None else existing_Q
-        piece1A, piece2A, piece3A = ([], "", "")
         exprGs = []
+        piece1A, piece2A, piece3A = ([], "", "")
         piece1P, piece2P, piece3P, piece4P = ([], [], "", "")
         for i, size in enumerate(shape):
             if (
@@ -525,6 +469,11 @@ def _init_Q_exprs(
                 piece2A = piece2A + letters[i]
                 piece3A = piece3A + letters[i]
 
+                piece1P.append(letters[i + 13])
+                piece2P.append(letters[i + 13])
+                piece3P = piece3P + letters[i + 13]
+                piece4P = piece4P + letters[i + 13]
+
                 piece1 = "".join(
                     [
                         (letters[j + 13] if j == i else letters[j])
@@ -533,11 +482,6 @@ def _init_Q_exprs(
                 )
                 subscripts = piece1 + "," + piece1 + "->" + letters[i + 13]
                 exprGs.append(subscripts)
-
-                piece1P.append(letters[i + 13])
-                piece2P.append(letters[i + 13])
-                piece3P = piece3P + letters[i + 13]
-                piece4P = piece4P + letters[i + 13]
             else:
                 # use triangular matrix as preconditioner for this dim
                 if existing_Q is None:
@@ -546,6 +490,12 @@ def _init_Q_exprs(
                 piece1A.append(letters[i] + letters[i + 13])
                 piece2A = piece2A + letters[i + 13]
                 piece3A = piece3A + letters[i]
+
+                a, b, c = (letters[i], letters[i + 13], letters[i + 26])
+                piece1P.append(a + b)
+                piece2P.append(a + c)
+                piece3P = piece3P + c
+                piece4P = piece4P + b
 
                 piece1 = "".join(
                     [
@@ -564,29 +514,12 @@ def _init_Q_exprs(
                 )
                 exprGs.append(subscripts)
 
-                a, b, c = (letters[i], letters[i + 13], letters[i + 26])
-                piece1P.append(a + b)
-                piece2P.append(a + c)
-                piece3P = piece3P + c
-                if buffer_q_q_conj:
-                    piece4P = piece4P + a
-                else:
-                    piece4P = piece4P + b
-
         exprA = ",".join(piece1A) + "," + piece2A + "->" + piece3A
-        exprGs = tuple(exprGs)
-        if buffer_q_q_conj:
-            exprP = ",".join(piece2P) + "," + piece3P + "->" + piece4P
-        else:
-            exprP = (
-                ",".join(piece1P)
-                + ","
-                + ",".join(piece2P)
-                + ","
-                + piece3P
-                + "->"
-                + piece4P
-            )
+        exprP = (
+            ",".join(piece1P) + "," + ",".join(piece2P) + "," + piece3P + "->" + piece4P
+        )
+
+    exprGs = tuple(exprGs)
 
     if existing_Q is not None:
         return exprA, exprGs, exprP
@@ -629,7 +562,7 @@ def _conjB(Q, G, V):
     return conjB
 
 
-def _update_precond(Q, G, conjB, exprs, precond_lr, buffer_q_q_conj):
+def _update_precond(Q, G, conjB, exprs, precond_lr):
     """Compute A and update Q."""
     exprA, exprGs, _ = exprs
 
@@ -638,9 +571,9 @@ def _update_precond(Q, G, conjB, exprs, precond_lr, buffer_q_q_conj):
     A_conj = A.conj()
     conjB_conj = conjB.conj()
 
-    def _update_q(q, exprG):
-        term1 = jnp.einsum(exprG, A, A_conj)
-        term2 = jnp.einsum(exprG, conjB_conj, conjB)
+    def _update_single_q(i, q):
+        term1 = jnp.einsum(exprGs[i], A, A_conj)
+        term2 = jnp.einsum(exprGs[i], conjB_conj, conjB)
 
         if q.ndim < 2:
             q -= (
@@ -658,22 +591,10 @@ def _update_precond(Q, G, conjB, exprs, precond_lr, buffer_q_q_conj):
             )
         return q
 
-    Q = [_update_q(q, exprG) for q, exprG in zip(Q, exprGs)]
-
-    if buffer_q_q_conj:
-        q_q_conj = []
-        for q in Q:
-            if q.ndim < 2:
-                q_q_conj.append(q.conj() * q)
-            else:
-                q_q_conj.append(jnp.einsum("ij,ik->jk", q.conj(), q))
-        return Q, q_q_conj
-    return Q
+    return [_update_single_q(i, q) for i, q in enumerate(Q)]
 
 
-def _precond_grad(Q, G, exprs, buffer_q_q_conj):
+def _precond_grad(Q, G, exprs):
     """Precondition gradient G with preconditioner Q."""
     exprP = exprs[-1]
-    if buffer_q_q_conj:
-        return jnp.einsum(exprP, *Q, G)
     return jnp.einsum(exprP, *[q.conj() for q in Q], *Q, G)
