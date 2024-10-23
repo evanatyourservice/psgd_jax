@@ -1,20 +1,22 @@
 from typing import Any, List, Optional, Union, Callable
 from functools import partial
 import string
+import numpy as np
 
+import chex
 import jax
 from jax import vmap
 import jax.numpy as jnp
+import flax.linen as nn
 from optax import tree_utils as otu
 from optax._src import base, transform
-from optax._src.linear_algebra import global_norm
 from optax._src.numerics import safe_int32_increment
 from optax._src.utils import canonicalize_dtype
 from optax._src.combine import chain
 
 
 def precond_update_prob_schedule(
-    max_prob=1.0, min_prob=0.03, decay=0.001, flat_start=200
+    max_prob=1.0, min_prob=0.03, decay=0.001, flat_start=250
 ):
     """Anneal preconditioner update probability during beginning of training.
 
@@ -22,8 +24,8 @@ def precond_update_prob_schedule(
     but once the preconditioner is learned the update probability can drop low.
 
     This schedule is an exponential anneal with a flat start. Default settings keep
-    update probability at 1.0 for 200 steps then exponentially anneal down to
-    `min_prob` by 4000 steps. Default settings work very well for most models and
+    update probability at 1.0 for 250 steps then exponentially anneal down to
+    `min_prob` by 4000 steps. Default settings work well for most models and
     training regimes.
     """
 
@@ -43,11 +45,12 @@ def scale_by_kron(
         float, Callable[[int], float]
     ] = precond_update_prob_schedule(),
     max_size_triangular: int = 8192,
-    max_skew_triangular: float = float("inf"),
     min_ndim_triangular: int = 2,
+    memory_save_mode: Optional[str] = None,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_dtype: Optional[Union[str, jnp.dtype]] = None,
-    precision: str = "tensorfloat32",
+    precond_update_precision: Optional[str] = "tensorfloat32",
+    precond_grads_precision: Optional[str] = None,
     scanned_layers: Optional[base.Params] = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
@@ -60,13 +63,18 @@ def scale_by_kron(
         preconditioner_update_probability: float, probability of updating the
             preconditioner. Default anneals from 1.0 to 0.03 by 4000 steps.
         max_size_triangular: int, max size for dim's preconditioner to be triangular.
-        max_skew_triangular: float, max skew for dim's preconditioner to be triangular.
         min_ndim_triangular: int, minimum number of dimensions a layer needs to have
             triangular preconditioners.
+        memory_save_mode: optional str, None, 'one_diag', or 'all_diag', None is default
+            to set all preconditioners to be triangular, 'one_diag' sets the largest
+            or last dim to be diagonal per layer, and 'all_diag' sets all preconditioners
+            to be diagonal.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
             Defaults to the same dtype as the parameters.
         precond_dtype: optional str or jnp.dtype, dtype of the preconditioner.
-        precision: str, precision for matmul during preconditioner update,
+        precond_update_precision: str, precision for matmul during preconditioner update,
+             'bfloat16', 'tensorfloat32', 'float32'.
+        precond_grads_precision: str, precision for matmul during preconditioning grads,
              'bfloat16', 'tensorfloat32', 'float32'.
         scanned_layers: optional base.Params, tree of bool same structure as params
             indicating scanned layers. PSGD will vmap over the first dim.
@@ -80,10 +88,9 @@ def scale_by_kron(
     mu_dtype = canonicalize_dtype(mu_dtype)
     precond_dtype = canonicalize_dtype(precond_dtype)
 
-    # some hardcoded settings
-    precond_lr = 0.1
-    precond_init_scale = 1.0
-    momentum_into_preconditioner = True
+    preconditioner_lr = 0.1
+    preconditioner_init_scale = 1.0
+    momentum_before_precond_update = True
 
     def map_fn(do_map, fn, *args):
         """Maybe map a fn along first axis."""
@@ -100,6 +107,12 @@ def scale_by_kron(
             return fn(*args)
 
     def init_fn(params):
+        params = jax.tree.map(
+            lambda x: x.unbox() if isinstance(x, nn.Partitioned) else x,
+            params,
+            is_leaf=lambda v: isinstance(v, (chex.Array, nn.Partitioned)),
+        )
+
         scanned_layers_ = scanned_layers
         if scanned_layers is None:
             scanned_layers_ = jax.tree.map(lambda _: False, params)
@@ -113,10 +126,10 @@ def scale_by_kron(
         Qs = [
             _init_Q_exprs(
                 t[0] if s else t,
-                precond_init_scale,
+                preconditioner_init_scale,
                 max_size_triangular,
-                max_skew_triangular,
                 min_ndim_triangular,
+                memory_save_mode,
                 precond_dtype,
             )[0]
             for t, s in zip(jax.tree.leaves(params), jax.tree.leaves(scanned_layers_))
@@ -164,6 +177,16 @@ def scale_by_kron(
         count_inc = safe_int32_increment(state["count"])
         key = jax.random.fold_in(jax.random.PRNGKey(5318008), state["count"])
 
+        # account for flax.linen.Partitioned grads and params
+        boxed_updates, grads_structure = jax.tree.flatten(
+            updates, is_leaf=lambda v: isinstance(v, (chex.Array, nn.Partitioned))
+        )
+        flax_partitioned = False
+        if isinstance(boxed_updates[0], nn.Partitioned):
+            flax_partitioned = True
+            updates = [u.unbox() for u in boxed_updates]
+            updates = grads_structure.unflatten(updates)
+
         scanned_layers_ = scanned_layers
         if scanned_layers is None:
             scanned_layers_ = jax.tree.map(lambda _: False, updates)
@@ -172,16 +195,12 @@ def scale_by_kron(
         if isinstance(preconditioner_update_probability, Callable):
             update_prob_in = preconditioner_update_probability(count_inc)
 
-        precond_lr_in = precond_lr
-        if isinstance(precond_lr, Callable):
-            precond_lr_in = precond_lr(count_inc)
-
         # momentum
         mu = None
         momentum_updates = updates
         if state["mu"] is not None:
             mu = otu.tree_update_moment(updates, state["mu"], b1, 1)
-            momentum_updates = mu
+            momentum_updates = otu.tree_bias_correction(mu, b1, count_inc)
 
         # flatten pytrees
         updates, grads_structure = jax.tree.flatten(updates)
@@ -193,10 +212,10 @@ def scale_by_kron(
         expressions = [
             _init_Q_exprs(
                 t[0] if s else t,
-                precond_init_scale,
+                preconditioner_init_scale,
                 max_size_triangular,
-                max_skew_triangular,
                 min_ndim_triangular,
+                memory_save_mode,
                 precond_dtype,
                 existing_Q=jax.tree.map(lambda d: d[0], Q) if s else Q,
             )
@@ -205,13 +224,13 @@ def scale_by_kron(
 
         # maybe update preconditioner
         def update_preconditioner(key, Qs):
-            with jax.default_matmul_precision(precision):
-                if momentum_into_preconditioner:
+            with jax.default_matmul_precision(precond_update_precision):
+                if momentum_before_precond_update:
                     precond_updates_in = momentum_updates
                 else:
                     precond_updates_in = updates
 
-                # random vectors
+                # create random vectors
                 key, subkey = jax.random.split(key)
                 Vs_keys = jax.random.split(subkey, len(precond_updates_in))
                 Vs = [
@@ -219,7 +238,7 @@ def scale_by_kron(
                     for k, g in zip(Vs_keys, precond_updates_in)
                 ]
 
-                # maybe balance preconditioners (useful for quantization/low precision)
+                # balance preconditioners about every 100 updates
                 def balance_Qs(Qs: List[List[jax.Array]]):
                     def _balance_Q(Q: List[jax.Array]):
                         norms = jnp.array(
@@ -230,7 +249,8 @@ def scale_by_kron(
                         return [q * x.astype(q.dtype) for q, x in zip(Q, to_mul)]
 
                     return [
-                        map_fn(s, _balance_Q, Q) for Q, s in zip(Qs, scanned_layers_)
+                        map_fn(s, _balance_Q, Q) if len(Q) > 1 else Q
+                        for Q, s in zip(Qs, scanned_layers_)
                     ]
 
                 key, subkey = jax.random.split(key)
@@ -247,12 +267,14 @@ def scale_by_kron(
                 new_Qs = [
                     map_fn(
                         s,
-                        partial(_update_precond, exprs=exprs, precond_lr=precond_lr_in),
+                        partial(
+                            _update_precond, exprs=exprs, precond_lr=preconditioner_lr
+                        ),
                         Q,
                         g,
-                        c_or_i,
+                        conjb,
                     )
-                    for s, exprs, Q, g, c_or_i in zip(
+                    for s, exprs, Q, g, conjb in zip(
                         scanned_layers_, expressions, Qs, precond_updates_in, conjBs
                     )
                 ]
@@ -268,23 +290,25 @@ def scale_by_kron(
         )
 
         # precondition gradients
-        precond_gs = [
-            map_fn(s, partial(_precond_grad, exprs=exprs), Q, g)
-            for s, exprs, Q, g in zip(
-                scanned_layers_, expressions, Qs, momentum_updates
-            )
-        ]
+        with jax.default_matmul_precision(precond_grads_precision):
+            precond_gs = [
+                map_fn(s, partial(_precond_grad, exprs=exprs), Q, g)
+                for s, exprs, Q, g in zip(
+                    scanned_layers_, expressions, Qs, momentum_updates
+                )
+            ]
 
         # trust region
-        # global clipping (sqrt n params)
-        max_norm = jnp.sqrt(
-            jnp.array(
-                [p.size for p in jax.tree.leaves(precond_gs)], dtype=jnp.float32
-            ).sum()
+        trust_region_scale = 2.0
+        precond_gs = jax.tree.map(
+            lambda x: jnp.tanh(x / trust_region_scale) * trust_region_scale, precond_gs
         )
-        precond_gs = _global_clip(precond_gs, max_norm)
-        # element-wise clipping (1.0)
-        precond_gs = jax.tree.map(lambda x: jnp.clip(x, -1.0, 1.0), precond_gs)
+
+        # box preconditioned grads
+        if flax_partitioned:
+            precond_gs = [
+                u.replace_boxed(pg) for u, pg in zip(boxed_updates, precond_gs)
+            ]
 
         # unflatten pytrees
         updates = grads_structure.unflatten(precond_gs)
@@ -304,16 +328,17 @@ def kron(
     learning_rate: Union[float, Callable[[int], float]] = 0.001,
     b1: float = 0.9,
     weight_decay: float = 0.0,
-    mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
+    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
     preconditioner_update_probability: Union[
         float, Callable[[int], float]
     ] = precond_update_prob_schedule(),
     max_size_triangular: int = 8192,
-    max_skew_triangular: int = float("inf"),
     min_ndim_triangular: int = 2,
+    memory_save_mode: Optional[str] = None,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_dtype: Optional[Union[str, jnp.dtype]] = None,
-    precision: str = "tensorfloat32",
+    precond_update_precision: Optional[str] = "tensorfloat32",
+    precond_grads_precision: Optional[str] = None,
     scanned_layers: Optional[base.Params] = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
@@ -324,18 +349,24 @@ def kron(
     Args:
         learning_rate: float or callable, learning rate.
         b1: float, momentum parameter.
-        weight_decay: float, weight decay. PSGD does not need high weight decay.
-        mask: optional Any or callable, mask to apply to parameters.
+        weight_decay: float, weight decay.
+        weight_decay_mask: optional Any or callable, pytree of bool same structure
+            as params with weight decay applied to True elements.
         preconditioner_update_probability: float, probability of updating the
             preconditioner. Default anneals from 1.0 to 0.03 by 4000 steps.
         max_size_triangular: int, max size for dim's preconditioner to be triangular.
-        max_skew_triangular: int, max skew for dim's preconditioner to be triangular.
         min_ndim_triangular: int, minimum number of dimensions a layer needs to have
             triangular preconditioners.
+        memory_save_mode: optional str, None, 'one_diag', or 'all_diag', None is default
+            to set all preconditioners to be triangular. 'one_diag' sets only the largest
+            or last dim in a layer to be diagonal, and 'all_diag' sets all preconditioners
+            to be diagonal.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
             Defaults to the same dtype as the parameters.
         precond_dtype: optional str or jnp.dtype, dtype of the preconditioner.
-        precision: str, precision for matmul during preconditioner update,
+        precond_update_precision: str, precision for matmul during preconditioner update,
+            'bfloat16', 'tensorfloat32', 'float32'.
+        precond_grads_precision: str, precision for matmul during preconditioning grads,
             'bfloat16', 'tensorfloat32', 'float32'.
         scanned_layers: optional base.Params, tree of bool same structure as params
             indicating scanned layers. PSGD will vmap over the first dim.
@@ -346,38 +377,30 @@ def kron(
     Returns:
         optax.GradientTransformationExtraArgs
     """
-    opt = [
+    optimizer = [
         scale_by_kron(
-            preconditioner_update_probability=preconditioner_update_probability,
             b1=b1,
+            preconditioner_update_probability=preconditioner_update_probability,
             max_size_triangular=max_size_triangular,
-            max_skew_triangular=max_skew_triangular,
             min_ndim_triangular=min_ndim_triangular,
+            memory_save_mode=memory_save_mode,
             mu_dtype=mu_dtype,
             precond_dtype=precond_dtype,
-            precision=precision,
+            precond_update_precision=precond_update_precision,
+            precond_grads_precision=precond_grads_precision,
             scanned_layers=scanned_layers,
             lax_map_scanned_layers=lax_map_scanned_layers,
             lax_map_batch_size=lax_map_batch_size,
         )
     ]
-    if weight_decay > 0:
-        opt.append(transform.add_decayed_weights(weight_decay, mask=mask))
-    opt.append(transform.scale_by_learning_rate(learning_rate))
-    return chain(*opt)
+    if weight_decay > 0.0:
+        optimizer.append(transform.add_decayed_weights(weight_decay, weight_decay_mask))
+    optimizer.append(transform.scale_by_learning_rate(learning_rate))
+    return chain(*optimizer)
 
 
-def _add_eps(x):
-    return jnp.clip(x, 1e-30, None)
-
-
-def _global_clip(updates, max_norm):
-    g_norm = global_norm(updates)
-    g_norm = jnp.maximum(max_norm, g_norm)
-    updates = jax.tree.map(
-        lambda u: (u / g_norm.astype(u.dtype)) * max_norm.astype(u.dtype), updates
-    )
-    return updates
+def _add_tiny(x):
+    return x + jnp.finfo(x.dtype).tiny
 
 
 def _norm_lower_bound(A: jax.Array):
@@ -421,9 +444,9 @@ def _norm_lower_bound(A: jax.Array):
 
 
 def _init_Q_exprs(
-    t, scale, max_size, max_skew, min_ndim_triangular, dtype, existing_Q=None
+    t, scale, max_size, min_ndim_triangular, memory_save_mode, dtype, existing_Q=None
 ):
-    """For a scalar or tensor `t`, we initialize its preconditioner `Q` and 
+    """For a scalar or tensor `t`, we initialize its preconditioner `Q` and
     reusable contraction expressions for updating `Q` and preconditioning gradient.
     """
     letters = string.ascii_lowercase + string.ascii_uppercase
@@ -436,8 +459,8 @@ def _init_Q_exprs(
             else existing_Q
         )
         exprA = ",->,"
-        exprP = ",,->,"
         exprGs = [",->"]
+        exprP = ",,->,"
     else:  # tensor
         if len(shape) > 13:
             raise ValueError(
@@ -445,21 +468,31 @@ def _init_Q_exprs(
             )
 
         scale = scale ** (1 / len(shape))
-        if len(shape) == 1:
-            beta_size = 1  # 2nd largest size
+
+        if memory_save_mode is None:
+            dim_diag = [False for _ in shape]
+        elif memory_save_mode == "one_diag":
+            rev_sorted_dims = np.argsort(shape)[::-1]
+            dim_diag = [False for _ in shape]
+            dim_diag[rev_sorted_dims[0]] = True
+        elif memory_save_mode == "all_diag":
+            dim_diag = [True for _ in shape]
         else:
-            beta_size = sorted(list(shape))[-2]
+            raise ValueError(
+                f"Invalid memory_save_mode: {memory_save_mode}, must be one of "
+                "[None, 'one_diag', 'all_diag']"
+            )
 
         Q = [] if existing_Q is None else existing_Q
-        exprGs = []
         piece1A, piece2A, piece3A = ([], "", "")
+        exprGs = []
         piece1P, piece2P, piece3P, piece4P = ([], [], "", "")
-        for i, size in enumerate(shape):
+        for i, (size, dim_d) in enumerate(zip(shape, dim_diag)):
             if (
                 size == 1
                 or size > max_size
-                or size > max_skew * beta_size
                 or len(shape) < min_ndim_triangular
+                or dim_d
             ):
                 # use diagonal matrix as preconditioner for this dim
                 if existing_Q is None:
@@ -469,19 +502,18 @@ def _init_Q_exprs(
                 piece2A = piece2A + letters[i]
                 piece3A = piece3A + letters[i]
 
+                piece1 = "".join(
+                    [
+                        (letters[i + 13] if j == i else letters[j])
+                        for j in range(len(shape))
+                    ]
+                )
+                exprGs.append(piece1 + "," + piece1 + "->" + letters[i + 13])
+
                 piece1P.append(letters[i + 13])
                 piece2P.append(letters[i + 13])
                 piece3P = piece3P + letters[i + 13]
                 piece4P = piece4P + letters[i + 13]
-
-                piece1 = "".join(
-                    [
-                        (letters[j + 13] if j == i else letters[j])
-                        for j in range(len(shape))
-                    ]
-                )
-                subscripts = piece1 + "," + piece1 + "->" + letters[i + 13]
-                exprGs.append(subscripts)
             else:
                 # use triangular matrix as preconditioner for this dim
                 if existing_Q is None:
@@ -491,28 +523,27 @@ def _init_Q_exprs(
                 piece2A = piece2A + letters[i + 13]
                 piece3A = piece3A + letters[i]
 
-                a, b, c = (letters[i], letters[i + 13], letters[i + 26])
-                piece1P.append(a + b)
-                piece2P.append(a + c)
-                piece3P = piece3P + c
-                piece4P = piece4P + b
-
                 piece1 = "".join(
                     [
-                        (letters[j + 13] if j == i else letters[j])
+                        (letters[i + 13] if j == i else letters[j])
                         for j in range(len(shape))
                     ]
                 )
                 piece2 = "".join(
                     [
-                        (letters[j + 26] if j == i else letters[j])
+                        (letters[i + 26] if j == i else letters[j])
                         for j in range(len(shape))
                     ]
                 )
-                subscripts = (
+                exprGs.append(
                     piece1 + "," + piece2 + "->" + letters[i + 13] + letters[i + 26]
                 )
-                exprGs.append(subscripts)
+
+                a, b, c = (letters[i], letters[i + 13], letters[i + 26])
+                piece1P.append(a + b)
+                piece2P.append(a + c)
+                piece3P = piece3P + c
+                piece4P = piece4P + b
 
         exprA = ",".join(piece1A) + "," + piece2A + "->" + piece3A
         exprP = (
@@ -520,23 +551,9 @@ def _init_Q_exprs(
         )
 
     exprGs = tuple(exprGs)
-
     if existing_Q is not None:
         return exprA, exprGs, exprP
     return [Q, (exprA, exprGs, exprP)]
-
-
-def _solve_triangular(A, B, upper, left=True):
-    """A triangular solve has roughly the same complexity as a matmul."""
-    dtype_in = jnp.promote_types(A.dtype, B.dtype)
-    A, B = A.astype(dtype_in), B.astype(dtype_in)
-    leading_dims = 0
-    if B.ndim > 2:
-        leading_dims = B.ndim - 2
-    solve_fn = partial(jax.lax.linalg.triangular_solve, left_side=left, lower=not upper)
-    for _ in range(leading_dims):
-        solve_fn = vmap(solve_fn, in_axes=(None, 0))
-    return solve_fn(A, B)
 
 
 def _solve_triangular_right(X, A):
@@ -544,10 +561,23 @@ def _solve_triangular_right(X, A):
 
     A triangular solve has roughly the same complexity as a matmul.
     """
-    if X.ndim > 1:
-        return _solve_triangular(A, X, upper=True, left=False)
-    else:
-        return _solve_triangular(A, X[None, :], upper=True, left=False)[0]
+    X_ndim = X.ndim
+    if X_ndim < 2:
+        X = X[None, :]
+
+    dtype_in = jnp.promote_types(A.dtype, X.dtype)
+    A, X = A.astype(dtype_in), X.astype(dtype_in)
+    leading_dims = 0
+    if X.ndim > 2:
+        leading_dims = X.ndim - 2
+    solve_fn = partial(jax.lax.linalg.triangular_solve, left_side=False, lower=False)
+    for _ in range(leading_dims):
+        solve_fn = vmap(solve_fn, in_axes=(None, 0))
+    solution = solve_fn(A, X)
+
+    if X_ndim < 2:
+        return solution[0]
+    return solution
 
 
 def _conjB(Q, G, V):
@@ -578,14 +608,14 @@ def _update_precond(Q, G, conjB, exprs, precond_lr):
         if q.ndim < 2:
             q -= (
                 precond_lr
-                / _add_eps(jnp.max(jnp.abs(term1 + term2)))
+                / _add_tiny(jnp.max(jnp.abs(term1 + term2)))
                 * (term1 - term2)
                 * q
             )
         else:
             q -= (
                 precond_lr
-                / _add_eps(_norm_lower_bound(term1 + term2))
+                / _add_tiny(_norm_lower_bound(term1 + term2))
                 * jnp.triu(term1 - term2)
                 @ q
             )

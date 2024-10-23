@@ -3,6 +3,7 @@ from functools import partial
 from typing import Union, Optional
 import numpy as np
 from matplotlib import pyplot as plt
+from pprint import pprint
 
 import jax
 from jax import numpy as jnp, jit, sharding
@@ -175,7 +176,7 @@ def main():
             elif precond_type == "kron":
                 del kwargs["precond_lr"]
                 del kwargs["update_global_norm_clip"]
-                optimizer = partial(kron, **kwargs)
+                optimizer = partial(kron, memory_save_mode="one_diag", **kwargs)
             else:
                 optimizer = None
 
@@ -188,6 +189,7 @@ def main():
 
             optimizer = optimizer()
             opt_state = optimizer.init(params)
+            pprint(opt_state)
 
             P = sharding.PartitionSpec
             devices = mesh_utils.create_device_mesh((2,))

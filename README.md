@@ -15,7 +15,7 @@ paper resources listed near the bottom of this readme.
 
 The most versatile and easy-to-use PSGD optimizer is `kron`, which uses a Kronecker-factored 
 preconditioner. It has less hyperparameters that need tuning than adam, and can generally act as a 
-drop-in replacement for adam.
+drop-in replacement.
 
 ## Installation
 
@@ -27,7 +27,7 @@ pip install psgd-jax
 
 Kron schedules the preconditioner update probability by default to start at 1.0 and anneal to 0.03 
 at the beginning of training, so training will be slightly slower at the start but will speed up 
-to near adam's speed by around 3k steps.
+by around 4k steps.
 
 For basic usage, use `kron` optimizer like any other optax optimizer:
 
@@ -37,7 +37,7 @@ from psgd_jax.kron import kron
 optimizer = kron()
 opt_state = optimizer.init(params)
 
-updates, opt_state = opt.update(grads, opt_state)
+updates, opt_state = optimizer.update(grads, opt_state)
 params = optax.apply_updates(params, updates)
 ```
 
@@ -46,52 +46,38 @@ params = optax.apply_updates(params, updates)
 TLDR: Learning rate and weight decay act similarly to adam's, start with adam-like settings and go 
 from there. There is no b2 or epsilon.
 
-These next settings control whether a dimension's preconditioner is diagonal or triangular. 
+These next 3 settings control whether a dimension's preconditioner is diagonal or triangular. 
 For example, for a layer with shape (256, 128), triagular preconditioners would be shapes (256, 256)
 and (128, 128), and diagonal preconditioners would be shapes (256,) and (128,). Depending on how 
-these settings are chosen, `kron` can balance between memory/speed and effectiveness (see below).
+these settings are chosen, `kron` can balance between memory/speed and effectiveness. Defaults lead
+to most precoditioners being triangular except for 1-dimensional layers and very large dimensions.
 
-`max_size_triangular`: Anything above this value will have a diagonal preconditioner, anything 
-below will have a triangular preconditioner. So if you have a dim with size 16,384 that you want 
-to use a diagonal preconditioner for, set `max_size_triangular` to something like 15,000. Default 
-is 8192.
-
-`max_skew_triangular`: Any tensor with skew above this value with make the larger dim diagonal.
-For example, if `max_skew_triangular` = 10, a bias layer of shape (256,) would be diagonal 
-because 256/1 > 10, and an embedding layer with shape (50000, 768) would be (diag, tri) 
-because 50000/768 is greater than 10. The default value is 'inf'.
+`max_size_triangular`: Any dimension with size above this value will have a diagonal preconditioner.
 
 `min_ndim_triangular`: Any tensor with less than this number of dims will have all diagonal 
-preconditioners. Default is 2, so single-dim tensors like bias and scale will use diagonal
+preconditioners. Default is 2, so single-dim layers like bias and scale will use diagonal
 preconditioners.
 
-Interesting setups using these settings:
-
-- Setting `max_size_triangular` to 0 will make all layers have diagonal preconditioners, which uses 
-very little memory and runs the fastest, but the optimizer might be less effective.
-
-- With `max_skew_triangular` set to 1, if a layer has one dim larger than the rest, it will use a diagonal 
-preconditioner. This setup usually results in less memory usage than adam, and is more performant 
-than having all diagonal preconditioners.
+`memory_save_mode`: Can be None, 'one_diag', or 'all_diag'. None is default and lets all 
+preconditioners be triangular. 'one_diag' sets the largest or last dim per layer as diagonal 
+using `np.argsort(shape)[::-1][0]`. 'all_diag' sets all preconditioners to be diagonal.
 
 `preconditioner_update_probability`: Preconditioner update probability uses a schedule by default 
 that works well for most cases. It anneals from 1 to 0.03 at the beginning of training, so training 
-will be slightly slower at the start but will speed up to near adam's speed by around 3k steps. PSGD 
-generally benefits from more preconditioner updates at the start of training, but once the preconditioner
-is learned it's okay to do them less often.
+will be slightly slower at the start but will speed up by around 4k steps. PSGD generally benefits
+from more preconditioner updates at the start of training, but once the preconditioner is learned 
+it's okay to do them less often. An easy way to adjust update frequency is to adjust `min_prob` 
+from `precond_update_prob_schedule`.
 
-This is the default schedule in the `precond_update_prob_schedule` function at the top of kron.py:
+This is the default schedule from the `precond_update_prob_schedule` function at the top of kron.py:
 
 <img src="assets/default_schedule.png" alt="Default Schedule" width="800" style="max-width: 100%; height: auto;" />
 
 
-See kron.py for more hyperparameter details.
-
-
 **Sharding:**
 
-Kron contains einsums, and in general the first axis of preconditioner matrices are the 
-contracting axes.
+Kron contains einsums, and in general the first axis of the preconditioner matrices is the 
+contracting axis.
 
 If using only FSDP, I usually shard the last axis of each preconditioner matrix and call it good.
 
@@ -99,20 +85,22 @@ However, if using tensor parallelism in addition to FSDP, you may think more car
 the preconditioners are sharded in train_state. For example, with grads of shape (256, 128) and kron 
 preconditioners of shapes (256, 256) and (128, 128), if the grads are sharded as (fsdp, tensor), 
 then you may want to shard the (256, 256) preconditioner as (fsdp, tensor) and the (128, 128) 
-preconditioner as (tensor, fsdp) so the grads and its preconditioners have same contraction axes. 
-Either way, though, a similar amount of allgathers and allreduces will take place so don't stress.
+preconditioner as (tensor, fsdp) so the grads and its preconditioners have similar contracting axes.
 
 
 **Scanned layers:**
 
-If you are scanning layers in your network, you can also have kron scan over these layers while updating 
-and applying the preconditioner. Simply pass in a pytree through `scanned_layers` with the same structure 
-as your params with bool values indicating which layers are scanned. PSGD will vmap over the first dims 
-of those layers. If you need a more advanced scanning setup, please open an issue.
+If you are scanning layers in your network, you can also have kron scan over these layers while 
+updating and applying the preconditioner. Simply pass in a pytree through `scanned_layers` with 
+the same structure as your params with bool values indicating which layers are scanned. PSGD will 
+vmap over the first dims of those layers. If you need a more advanced scanning setup, please open 
+an issue.
 
-For very large models, the preconditioner update may use too much memory all at once, in which case 
-you can set `lax_map_scanned_layers` to `True` and set `lax_map_batch_size` to a reasonable batch size 
-for your setup (`lax.map` scans over batches of vmap, see JAX docs).
+For very large models, the preconditioner update may use too much memory all at once when scanning, 
+in which case you can set `lax_map_scanned_layers` to `True` and set `lax_map_batch_size` to a 
+reasonable batch size for your setup (`lax.map` scans over batches of vmap, see JAX docs). If 
+your net is 32 layers and you're hitting OOM during the optimizer step, you can break the model into
+2 or 4 and set `lax_map_batch_size` to 16 or 8 respectively.
 
 
 ## Advanced Usage (XMat, LRA, Affine)
