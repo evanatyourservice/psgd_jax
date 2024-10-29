@@ -54,6 +54,7 @@ def scale_by_kron(
     scanned_layers: Optional[base.Params] = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
+    trust_region_scale: float = 2.0,
 ) -> base.GradientTransformationExtraArgs:
     """
     Implements PSGD Kron from https://github.com/lixilinx/psgd_torch.
@@ -81,6 +82,9 @@ def scale_by_kron(
         lax_map_scanned_layers: bool, whether to use lax.map for scanned layers
             instead of vmap. Useful to save memory with large models.
         lax_map_batch_size: int, batch size for lax.map, see JAX docs for more info.
+        trust_region_scale: float, trust region on preconditioned grads. Normally this
+            doesn't need to be changed but if things seem unstable you can try reducing
+            this to 1.5.
 
     Returns:
         optax.GradientTransformationExtraArgs
@@ -299,7 +303,6 @@ def scale_by_kron(
             ]
 
         # trust region
-        trust_region_scale = 2.0
         precond_gs = jax.tree.map(
             lambda x: jnp.tanh(x / trust_region_scale) * trust_region_scale, precond_gs
         )
@@ -342,6 +345,7 @@ def kron(
     scanned_layers: Optional[base.Params] = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
+    trust_region_scale: float = 2.0,
 ) -> base.GradientTransformationExtraArgs:
     """
     Implements PSGD Kron from https://github.com/lixilinx/psgd_torch.
@@ -373,6 +377,9 @@ def kron(
         lax_map_scanned_layers: bool, whether to use lax.map for scanned layers
             instead of vmap. Useful to save memory with large models.
         lax_map_batch_size: int, batch size for lax.map, see JAX docs for more info.
+        trust_region_scale: float, trust region on preconditioned grads. Normally this
+            doesn't need to be changed but if things seem unstable you can try reducing
+            this to 1.5.
 
     Returns:
         optax.GradientTransformationExtraArgs
@@ -391,6 +398,7 @@ def kron(
             scanned_layers=scanned_layers,
             lax_map_scanned_layers=lax_map_scanned_layers,
             lax_map_batch_size=lax_map_batch_size,
+            trust_region_scale=trust_region_scale,
         )
     ]
     if weight_decay > 0.0:
