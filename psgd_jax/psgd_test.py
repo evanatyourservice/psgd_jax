@@ -69,7 +69,7 @@ def _plot_rosenbrock(test_iter, plot_title, losses, save_dir=None):
 def _loss_fn_rosenbrock(xs):
     # rosenbrock function
     l = lambda x, y: (1 - x) ** 2 + 1 * (y - x**2) ** 2
-    flat_xs = jax.tree.leaves(xs)
+    flat_xs = jax.tree.leaves(xs)[:-1]
     return sum([l(x[0], x[1]) for x in flat_xs]) / len(flat_xs)
 
 
@@ -89,6 +89,7 @@ def _make_params(key):
         for i, k in enumerate(keys)
     }
     params["00"] = jnp.array([-2, 2], dtype=jnp.float32)
+    params["scalar"] = jnp.array(0.0, dtype=jnp.float32)
     return params
 
 
@@ -132,14 +133,14 @@ def _run_test(
         params = optax.apply_updates(params, updates)
         losses = losses.at[i].set(loss_out)
         recorded_params = recorded_params.at[:, :, i + 1].set(
-            jnp.stack(jax.tree.leaves(params))
+            jnp.stack(jax.tree.leaves(params)[:-1])
         )
         return params, opt_state, key, losses, recorded_params
 
     losses = jnp.zeros([steps])
-    recorded_params = jnp.zeros([len(jax.tree.leaves(params)), 2, steps + 1])
+    recorded_params = jnp.zeros([len(jax.tree.leaves(params)[:-1]), 2, steps + 1])
     recorded_params = recorded_params.at[:, :, 0].set(
-        jnp.stack(jax.tree.leaves(params))
+        jnp.stack(jax.tree.leaves(params)[:-1])
     )
     init_state = (params, opt_state, jax.random.PRNGKey(0), losses, recorded_params)
     params, opt_state, _, losses, recorded_params = jax.lax.fori_loop(
