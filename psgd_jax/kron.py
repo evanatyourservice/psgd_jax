@@ -54,7 +54,7 @@ def scale_by_kron(
     scanned_layers: Optional[base.Params] = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
-    trust_region_scale: float = 2.0,
+    trust_region_scale: float = 1.5,
 ) -> base.GradientTransformationExtraArgs:
     """
     Implements PSGD Kron from https://github.com/lixilinx/psgd_torch.
@@ -303,8 +303,12 @@ def scale_by_kron(
             ]
 
         # trust region
+        trust_region_fn = lambda x: 0.1 * jnp.sign(x) * jnp.log(
+            jnp.abs(x) + 1
+        ) + 0.9 * jnp.tanh(x)
         precond_gs = jax.tree.map(
-            lambda x: jnp.tanh(x / trust_region_scale) * trust_region_scale, precond_gs
+            lambda x: trust_region_fn(x / trust_region_scale) * trust_region_scale,
+            precond_gs,
         )
 
         # box preconditioned grads
@@ -345,7 +349,7 @@ def kron(
     scanned_layers: Optional[base.Params] = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
-    trust_region_scale: float = 2.0,
+    trust_region_scale: float = 1.5,
 ) -> base.GradientTransformationExtraArgs:
     """
     Implements PSGD Kron from https://github.com/lixilinx/psgd_torch.
@@ -466,9 +470,9 @@ def _init_Q_exprs(
             if existing_Q is None
             else existing_Q
         )
-        exprA = ",->,"
+        exprA = ",->"
         exprGs = [",->"]
-        exprP = ",,->,"
+        exprP = ",,->"
     else:  # tensor
         if len(shape) > 13:
             raise ValueError(
@@ -613,20 +617,17 @@ def _update_precond(Q, G, conjB, exprs, precond_lr):
         term1 = jnp.einsum(exprGs[i], A, A_conj)
         term2 = jnp.einsum(exprGs[i], conjB_conj, conjB)
 
+        tmp = term1 - term2
+        tmp *= precond_lr
         if q.ndim < 2:
-            q -= (
-                precond_lr
-                / _add_tiny(jnp.max(jnp.abs(term1 + term2)))
-                * (term1 - term2)
-                * q
-            )
+            tmp *= q
+            tmp /= _add_tiny(jnp.max(jnp.abs(term1 + term2)))
+            q -= tmp
         else:
-            q -= (
-                precond_lr
-                / _add_tiny(_norm_lower_bound(term1 + term2))
-                * jnp.triu(term1 - term2)
-                @ q
-            )
+            tmp = jnp.triu(tmp)
+            tmp /= _add_tiny(_norm_lower_bound(term1 + term2))
+            tmp @= q
+            q -= tmp
         return q
 
     return [_update_single_q(i, q) for i, q in enumerate(Q)]
