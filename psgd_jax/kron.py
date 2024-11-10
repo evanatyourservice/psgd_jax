@@ -47,6 +47,7 @@ def scale_by_kron(
     max_size_triangular: int = 8192,
     min_ndim_triangular: int = 2,
     memory_save_mode: Optional[str] = None,
+    momentum_into_precond_update: bool = True,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_update_precision: Optional[str] = "tensorfloat32",
@@ -54,7 +55,6 @@ def scale_by_kron(
     scanned_layers: Optional[base.Params] = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
-    trust_region_scale: float = 1.5,
 ) -> base.GradientTransformationExtraArgs:
     """
     Implements PSGD Kron from https://github.com/lixilinx/psgd_torch.
@@ -70,6 +70,8 @@ def scale_by_kron(
             to set all preconditioners to be triangular, 'one_diag' sets the largest
             or last dim to be diagonal per layer, and 'all_diag' sets all preconditioners
             to be diagonal.
+        momentum_into_precond_update: bool, whether to send momentum into preconditioner
+            update instead of raw gradients.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
             Defaults to the same dtype as the parameters.
         precond_dtype: optional str or jnp.dtype, dtype of the preconditioner.
@@ -82,19 +84,14 @@ def scale_by_kron(
         lax_map_scanned_layers: bool, whether to use lax.map for scanned layers
             instead of vmap. Useful to save memory with large models.
         lax_map_batch_size: int, batch size for lax.map, see JAX docs for more info.
-        trust_region_scale: float, trust region on preconditioned grads. Normally this
-            doesn't need to be changed but if things seem unstable you can try reducing
-            this to 1.5.
 
     Returns:
         optax.GradientTransformationExtraArgs
     """
     mu_dtype = canonicalize_dtype(mu_dtype)
     precond_dtype = canonicalize_dtype(precond_dtype)
-
     preconditioner_lr = 0.1
     preconditioner_init_scale = 1.0
-    momentum_before_precond_update = True
 
     def map_fn(do_map, fn, *args):
         """Maybe map a fn along first axis."""
@@ -229,7 +226,7 @@ def scale_by_kron(
         # maybe update preconditioner
         def update_preconditioner(key, Qs):
             with jax.default_matmul_precision(precond_update_precision):
-                if momentum_before_precond_update:
+                if momentum_into_precond_update:
                     precond_updates_in = momentum_updates
                 else:
                     precond_updates_in = updates
@@ -307,8 +304,7 @@ def scale_by_kron(
             jnp.abs(x) + 1
         ) + 0.9 * jnp.tanh(x)
         precond_gs = jax.tree.map(
-            lambda x: trust_region_fn(x / trust_region_scale) * trust_region_scale,
-            precond_gs,
+            lambda x: jnp.clip(trust_region_fn(x / 1.5) * 1.5, -2, 2), precond_gs
         )
 
         # box preconditioned grads
@@ -342,6 +338,7 @@ def kron(
     max_size_triangular: int = 8192,
     min_ndim_triangular: int = 2,
     memory_save_mode: Optional[str] = None,
+    momentum_into_precond_update: bool = True,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_update_precision: Optional[str] = "tensorfloat32",
@@ -349,7 +346,6 @@ def kron(
     scanned_layers: Optional[base.Params] = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
-    trust_region_scale: float = 1.5,
 ) -> base.GradientTransformationExtraArgs:
     """
     Implements PSGD Kron from https://github.com/lixilinx/psgd_torch.
@@ -369,6 +365,8 @@ def kron(
             to set all preconditioners to be triangular. 'one_diag' sets only the largest
             or last dim in a layer to be diagonal, and 'all_diag' sets all preconditioners
             to be diagonal.
+        momentum_into_precond_update: bool, whether to send momentum into preconditioner
+            update instead of raw gradients.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
             Defaults to the same dtype as the parameters.
         precond_dtype: optional str or jnp.dtype, dtype of the preconditioner.
@@ -381,9 +379,6 @@ def kron(
         lax_map_scanned_layers: bool, whether to use lax.map for scanned layers
             instead of vmap. Useful to save memory with large models.
         lax_map_batch_size: int, batch size for lax.map, see JAX docs for more info.
-        trust_region_scale: float, trust region on preconditioned grads. Normally this
-            doesn't need to be changed but if things seem unstable you can try reducing
-            this to 1.5.
 
     Returns:
         optax.GradientTransformationExtraArgs
@@ -395,6 +390,7 @@ def kron(
             max_size_triangular=max_size_triangular,
             min_ndim_triangular=min_ndim_triangular,
             memory_save_mode=memory_save_mode,
+            momentum_into_precond_update=momentum_into_precond_update,
             mu_dtype=mu_dtype,
             precond_dtype=precond_dtype,
             precond_update_precision=precond_update_precision,
@@ -402,7 +398,6 @@ def kron(
             scanned_layers=scanned_layers,
             lax_map_scanned_layers=lax_map_scanned_layers,
             lax_map_batch_size=lax_map_batch_size,
-            trust_region_scale=trust_region_scale,
         )
     ]
     if weight_decay > 0.0:

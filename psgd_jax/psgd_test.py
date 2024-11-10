@@ -177,7 +177,12 @@ def main():
             elif precond_type == "kron":
                 del kwargs["precond_lr"]
                 del kwargs["update_global_norm_clip"]
-                optimizer = partial(kron, memory_save_mode="one_diag", **kwargs)
+                optimizer = partial(
+                    kron,
+                    memory_save_mode=None,
+                    momentum_into_precond_update=False,
+                    **kwargs,
+                )
             else:
                 optimizer = None
 
