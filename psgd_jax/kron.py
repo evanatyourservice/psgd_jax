@@ -16,7 +16,7 @@ from optax._src.combine import chain
 
 
 def precond_update_prob_schedule(
-    max_prob=1.0, min_prob=0.03, decay=0.001, flat_start=250
+    max_prob=1.0, min_prob=0.03, decay=0.001, flat_start=500
 ):
     """Anneal preconditioner update probability during beginning of training.
 
@@ -41,6 +41,7 @@ def precond_update_prob_schedule(
 
 def scale_by_kron(
     b1: float = 0.9,
+    normalize_grads: bool = False,
     preconditioner_update_probability: Union[
         float, Callable[[int], float]
     ] = precond_update_prob_schedule(),
@@ -48,6 +49,8 @@ def scale_by_kron(
     min_ndim_triangular: int = 2,
     memory_save_mode: Optional[str] = None,
     momentum_into_precond_update: bool = True,
+    preconditioner_lr: float = 0.1,
+    preconditioner_init_scale: float = 1.0,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_update_precision: Optional[str] = "tensorfloat32",
@@ -61,6 +64,7 @@ def scale_by_kron(
 
     Args:
         b1: float, momentum parameter.
+        normalize_grads: bool, whether to normalize gradients to unit norm layer-wise.
         preconditioner_update_probability: float, probability of updating the
             preconditioner. Default anneals from 1.0 to 0.03 by 4000 steps.
         max_size_triangular: int, max size for dim's preconditioner to be triangular.
@@ -72,6 +76,8 @@ def scale_by_kron(
             to be diagonal.
         momentum_into_precond_update: bool, whether to send momentum into preconditioner
             update instead of raw gradients.
+        preconditioner_lr: float, learning rate for preconditioner.
+        preconditioner_init_scale: float, scale for preconditioner initialization.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
             Defaults to the same dtype as the parameters.
         precond_dtype: optional str or jnp.dtype, dtype of the preconditioner.
@@ -90,8 +96,6 @@ def scale_by_kron(
     """
     mu_dtype = canonicalize_dtype(mu_dtype)
     precond_dtype = canonicalize_dtype(precond_dtype)
-    preconditioner_lr = 0.1
-    preconditioner_init_scale = 1.0
 
     def map_fn(do_map, fn, *args):
         """Maybe map a fn along first axis."""
@@ -171,7 +175,12 @@ def scale_by_kron(
                 )
 
         # initial state
-        return dict(count=jnp.zeros([], jnp.int32), mu=mu, Qs_preconditioners=Qs)
+        return dict(
+            count=jnp.zeros([], jnp.int32),
+            mu=mu,
+            Qs_preconditioners=Qs,
+            update_counter=jnp.zeros([], jnp.int32),
+        )
 
     def update_fn(updates: base.Updates, state: dict, params: base.Params = None):
         del params
@@ -195,6 +204,13 @@ def scale_by_kron(
         update_prob_in = preconditioner_update_probability
         if isinstance(preconditioner_update_probability, Callable):
             update_prob_in = preconditioner_update_probability(count_inc)
+
+        # normalize grads
+        if normalize_grads:
+            updates = jax.tree.map(
+                lambda g: g / (jnp.linalg.norm(g) + 1e-16),
+                updates,
+            )
 
         # momentum
         mu = None
@@ -231,14 +247,6 @@ def scale_by_kron(
                 else:
                     precond_updates_in = updates
 
-                # create random vectors
-                key, subkey = jax.random.split(key)
-                Vs_keys = jax.random.split(subkey, len(precond_updates_in))
-                Vs = [
-                    jax.random.normal(k, shape=g.shape, dtype=g.dtype)
-                    for k, g in zip(Vs_keys, precond_updates_in)
-                ]
-
                 # balance preconditioners about every 100 updates
                 def balance_Qs(Qs: List[List[jax.Array]]):
                     def _balance_Q(Q: List[jax.Array]):
@@ -257,6 +265,22 @@ def scale_by_kron(
                 key, subkey = jax.random.split(key)
                 do_balances = jax.random.uniform(subkey) < 0.01
                 Qs = jax.lax.cond(do_balances, balance_Qs, lambda qs: qs, Qs)
+
+                # create random vectors
+                key, subkey = jax.random.split(key)
+                Vs_keys = jax.random.split(subkey, len(precond_updates_in))
+                Vs = [
+                    jax.random.normal(k, shape=g.shape, dtype=g.dtype)
+                    for k, g in zip(Vs_keys, precond_updates_in)
+                ]
+
+                # damp based on machine precision (f32 probably enough)
+                damp_eps = jnp.sqrt(jnp.finfo(jnp.float32).eps)
+                precond_updates_in = jax.tree.map(
+                    lambda g, v: g + damp_eps.astype(g.dtype) * jnp.mean(jnp.abs(g)) * v,
+                    precond_updates_in,
+                    Vs,
+                )
 
                 # form conjB
                 conjBs = [
@@ -283,12 +307,12 @@ def scale_by_kron(
                 new_Qs = otu.tree_cast(new_Qs, precond_dtype)
                 return new_Qs
 
+        # update preconditioner deterministically
+        update_counter_inc = safe_int32_increment(state["update_counter"])
+        do_update = update_counter_inc >= 1 / update_prob_in
+        update_counter_inc = jnp.where(do_update, 0, update_counter_inc)
         key, subkey = jax.random.split(key)
-        do_update = jax.random.uniform(subkey, dtype=jnp.float32) < update_prob_in
-        key, subkey = jax.random.split(key)
-        Qs = jax.lax.cond(
-            do_update, update_preconditioner, lambda _, qs: qs, subkey, Qs
-        )
+        Qs = jax.lax.cond(do_update, update_preconditioner, lambda _, qs: qs, subkey, Qs)
 
         # precondition gradients
         with jax.default_matmul_precision(precond_grads_precision):
@@ -298,14 +322,6 @@ def scale_by_kron(
                     scanned_layers_, expressions, Qs, momentum_updates
                 )
             ]
-
-        # trust region
-        trust_region_fn = lambda x: 0.1 * jnp.sign(x) * jnp.log(
-            jnp.abs(x) + 1
-        ) + 0.9 * jnp.tanh(x)
-        precond_gs = jax.tree.map(
-            lambda x: jnp.clip(trust_region_fn(x / 1.5) * 1.5, -2, 2), precond_gs
-        )
 
         # box preconditioned grads
         if flax_partitioned:
@@ -320,7 +336,12 @@ def scale_by_kron(
         # dtypes and new state
         mu = otu.tree_cast(mu, mu_dtype)
         Qs = otu.tree_cast(Qs, precond_dtype)
-        state = dict(count=count_inc, mu=mu, Qs_preconditioners=Qs)
+        state = dict(
+            count=count_inc,
+            mu=mu,
+            Qs_preconditioners=Qs,
+            update_counter=update_counter_inc,
+        )
 
         return updates, state
 
@@ -330,6 +351,7 @@ def scale_by_kron(
 def kron(
     learning_rate: Union[float, Callable[[int], float]] = 0.001,
     b1: float = 0.9,
+    normalize_grads: bool = False,
     weight_decay: float = 0.0,
     weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
     preconditioner_update_probability: Union[
@@ -339,6 +361,8 @@ def kron(
     min_ndim_triangular: int = 2,
     memory_save_mode: Optional[str] = None,
     momentum_into_precond_update: bool = True,
+    preconditioner_lr: float = 0.1,
+    preconditioner_init_scale: float = 1.0,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_dtype: Optional[Union[str, jnp.dtype]] = None,
     precond_update_precision: Optional[str] = "tensorfloat32",
@@ -353,6 +377,7 @@ def kron(
     Args:
         learning_rate: float or callable, learning rate.
         b1: float, momentum parameter.
+        normalize_grads: bool, whether to normalize gradients to unit norm layer-wise.
         weight_decay: float, weight decay.
         weight_decay_mask: optional Any or callable, pytree of bool same structure
             as params with weight decay applied to True elements.
@@ -367,6 +392,8 @@ def kron(
             to be diagonal.
         momentum_into_precond_update: bool, whether to send momentum into preconditioner
             update instead of raw gradients.
+        preconditioner_lr: float, learning rate for preconditioner.
+        preconditioner_init_scale: float, scale for preconditioner initialization.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
             Defaults to the same dtype as the parameters.
         precond_dtype: optional str or jnp.dtype, dtype of the preconditioner.
@@ -386,11 +413,14 @@ def kron(
     optimizer = [
         scale_by_kron(
             b1=b1,
+            normalize_grads=normalize_grads,
             preconditioner_update_probability=preconditioner_update_probability,
             max_size_triangular=max_size_triangular,
             min_ndim_triangular=min_ndim_triangular,
             memory_save_mode=memory_save_mode,
             momentum_into_precond_update=momentum_into_precond_update,
+            preconditioner_lr=preconditioner_lr,
+            preconditioner_init_scale=preconditioner_init_scale,
             mu_dtype=mu_dtype,
             precond_dtype=precond_dtype,
             precond_update_precision=precond_update_precision,
