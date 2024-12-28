@@ -10,34 +10,33 @@ readme = { file = "README.md", content-type = "text/markdown" }
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
 authors = [
-    { name = "Evan Walters" },
-    { name = "Omead Pooladzandi" },
-    { name = "Xi-Lin Li" },
+	{ name = "Evan Walters" },
+	{ name = "Omead Pooladzandi" },
+	{ name = "Xi-Lin Li" },
 ]
-keywords = [
-    "python",
-    "machine learning",
-    "optimization",
-    "jax",
-]
+keywords = ["python", "machine learning", "optimization", "jax"]
 classifiers = [
-    "Environment :: Console",
-    "Programming Language :: Python",
-    "Intended Audience :: Developers",
-    "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3",
-    "Intended Audience :: Science/Research",
-    "Development Status :: 4 - Beta",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: Software Development :: Libraries :: Python Modules",
+	"Environment :: Console",
+	"Programming Language :: Python",
+	"Intended Audience :: Developers",
+	"Operating System :: OS Independent",
+	"Programming Language :: Python :: 3",
+	"Intended Audience :: Science/Research",
+	"Development Status :: 4 - Beta",
+	"Topic :: Scientific/Engineering :: Artificial Intelligence",
+	"Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dependencies = [
-    "numpy",
-    "matplotlib",
-    "jax",
-    "optax",
-]
+dependencies = ["numpy", "matplotlib", "jax", "optax"]
 
 [project.urls]
 homepage = "https://github.com/evanatyourservice/psgd_jax"
 repository = "https://github.com/evanatyourservice/psgd_jax"
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E402", "F401"]
+"**/{tests,docs,tools}/*" = ["E402"]
+"tests/*" = ["E402", "E731"]
+"benchmarks/*" = ["E402", "E731"]
+"triton_*" = ["E741", "ISC001", "E501", "E731"]
+"pallas_*" = ["E741", "ISC001", "E501", "E731"]
+"*_test.py" = ["E741", "ISC001", "E501", "E731","E402"]

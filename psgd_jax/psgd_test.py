@@ -1,11 +1,14 @@
 import os
 from functools import partial
+import time
 from typing import Union, Optional
 import numpy as np
 from matplotlib import pyplot as plt
 from pprint import pprint
 
 import jax
+
+jax.config.update("jax_platform_name", "cpu")
 from jax import numpy as jnp, jit, sharding
 from jax.random import uniform
 from jax.experimental import mesh_utils
@@ -17,8 +20,15 @@ from psgd_jax.low_rank_approximation import low_rank_approximation
 from psgd_jax.affine import affine
 from psgd_jax.kron import kron
 
-
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
+PH_DEVICES = 2
+ALGO_TO_TEST = [
+    "kron",
+    "xmat",
+    "low_rank_approximation",
+    "affine",
+]
+SILENCE = True  # Set to False to print more information and show plots
+os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={PH_DEVICES}"
 
 
 def _plot_rosenbrock(test_iter, plot_title, losses, save_dir=None):
@@ -62,15 +72,19 @@ def _plot_rosenbrock(test_iter, plot_title, losses, save_dir=None):
 
     if save_dir is not None:
         plt.savefig(os.path.join(save_dir, f"{plot_title}.png"))
-    plt.show()
+    if not SILENCE:
+        plt.show()
+    plt.close(fig)
 
 
 @jit
 def _loss_fn_rosenbrock(xs):
     # rosenbrock function
-    l = lambda x, y: (1 - x) ** 2 + 1 * (y - x**2) ** 2
-    flat_xs = jax.tree.leaves(xs)[:-1]
-    return sum([l(x[0], x[1]) for x in flat_xs]) / len(flat_xs)
+    def fn(x, y):
+        return (1 - x) ** 2 + 1 * (y - x**2) ** 2
+
+    flat_xs = jax.tree.leaves(xs)[:-1]  # Exclude the scalar parameter
+    return sum([fn(x[0], x[1]) for x in flat_xs]) / len(flat_xs)
 
 
 @jit
@@ -82,7 +96,7 @@ def _make_params(key):
     params = {
         f"{i:02}": jnp.array(
             [
-                uniform(k[0], [], jnp.float32, -2, -1),
+                uniform(k[0], [], jnp.float32, -2, 2),  # Corrected lower bound for x
                 uniform(k[1], [], jnp.float32, -1, 3),
             ]
         )
@@ -127,8 +141,8 @@ def _run_test(
                 update_preconditioner=update_precond,
             )
         else:
-            loss_out, updates = jax.value_and_grad(_loss_fn_rosenbrock)(params)
-            updates, opt_state = optimizer.update(updates, opt_state, params)
+            loss_out, grads = jax.value_and_grad(_loss_fn_rosenbrock)(params)
+            updates, opt_state = optimizer.update(grads, opt_state, params)
 
         params = optax.apply_updates(params, updates)
         losses = losses.at[i].set(loss_out)
@@ -154,13 +168,15 @@ def main():
     print("Testing PSGD variants on Rosenbrock function")
 
     for use_hessian in [False, True]:
-        for precond_type in ["kron", "xmat", "low_rank_approximation", "affine"]:
+        for precond_type in ALGO_TO_TEST:
             if use_hessian and precond_type == "kron":
                 # kron just uses whitening (gg^T)
                 continue
             steps = 500
             psgd_update_probability = 1.0
-            learning_rate = optax.linear_schedule(0.1, 0.0, steps)
+            learning_rate = optax.linear_schedule(
+                0.1, 0.0, steps
+            )  # Reduced initial learning rate
             kwargs = {
                 "learning_rate": learning_rate,
                 "preconditioner_update_probability": psgd_update_probability,
@@ -169,36 +185,37 @@ def main():
                 "update_global_norm_clip": np.sqrt(32.0),
             }
             if precond_type == "xmat":
-                optimizer = partial(xmat, **kwargs)
+                optimizer_partial = partial(xmat, **kwargs)
             elif precond_type == "low_rank_approximation":
-                optimizer = partial(low_rank_approximation, **kwargs)
+                optimizer_partial = partial(low_rank_approximation, **kwargs)
             elif precond_type == "affine":
-                optimizer = partial(affine, **kwargs)
+                optimizer_partial = partial(affine, **kwargs)
             elif precond_type == "kron":
                 del kwargs["precond_lr"]
                 del kwargs["update_global_norm_clip"]
-                optimizer = partial(
+                optimizer_partial = partial(
                     kron,
                     memory_save_mode=None,
-                    momentum_into_precond_update=False,
                     **kwargs,
                 )
             else:
-                optimizer = None
+                optimizer_partial = None
 
             plot_title = f"{precond_type} PSGD {'Hvp' if use_hessian else 'gg^T'}"
-            print(plot_title)
+            if not SILENCE:
+                print(plot_title)
 
             seed = np.random.randint(0, 2**30)
 
             params = _make_params(jax.random.PRNGKey(seed))
 
-            optimizer = optimizer()
+            optimizer = optimizer_partial()
             opt_state = optimizer.init(params)
-            pprint(opt_state)
+            if not SILENCE:
+                pprint(opt_state)
 
             P = sharding.PartitionSpec
-            devices = mesh_utils.create_device_mesh((2,))
+            devices = mesh_utils.create_device_mesh((PH_DEVICES,))
             mesh = sharding.Mesh(devices, ("m",))
 
             def create_spec(x):
@@ -219,6 +236,7 @@ def main():
             initial_loss = _loss_fn_rosenbrock(params)
             print(f"Initial loss = {initial_loss}")
 
+            # JIT compile _run_test function once before timing
             run_test_fn = jit(
                 _run_test,
                 static_argnums=(0, 3, 4, 5),
@@ -230,6 +248,17 @@ def main():
                 ),
             )
 
+            # Run once to compile
+            run_test_fn(
+                optimizer,
+                opt_state,
+                params,
+                1,  # Reduced number of steps for compilation
+                use_hessian,
+                psgd_update_probability,
+            )
+
+            took = time.time()
             params, opt_state, losses, recorded_params = run_test_fn(
                 optimizer,
                 opt_state,
@@ -240,11 +269,15 @@ def main():
             )
 
             final_loss = _loss_fn_rosenbrock(params)
+            took = time.time() - took
             print(f"Final loss = {final_loss}")
+            print("Computations took", took)
+            print("Computations took (per step)", took / steps)
 
-            print("Output sharding:")
-            print(jax.tree.map(lambda x: x.sharding, params))
-            print(jax.tree.map(lambda x: x.sharding, opt_state))
+            if not SILENCE:
+                print("Output sharding:")
+                print(jax.tree.map(lambda x: x.sharding, params))
+                print(jax.tree.map(lambda x: x.sharding, opt_state))
 
             _plot_rosenbrock(recorded_params, plot_title, losses)
 
