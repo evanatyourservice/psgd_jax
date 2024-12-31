@@ -9,7 +9,7 @@ from jax import vmap
 import jax.numpy as jnp
 import flax.linen as nn
 from optax import tree_utils as otu
-from optax._src import base, transform
+from optax._src import base, transform, clipping, numerics
 from optax._src.numerics import safe_int32_increment
 from optax._src.utils import canonicalize_dtype
 from optax._src.combine import chain
@@ -41,7 +41,6 @@ def precond_update_prob_schedule(
 
 def scale_by_kron(
     b1: float = 0.9,
-    normalize_grads: bool = False,
     preconditioner_update_probability: Union[
         float, Callable[[int], float]
     ] = precond_update_prob_schedule(),
@@ -64,7 +63,6 @@ def scale_by_kron(
 
     Args:
         b1: float, momentum parameter.
-        normalize_grads: bool, whether to normalize gradients to unit norm layer-wise.
         preconditioner_update_probability: float, probability of updating the
             preconditioner. Default anneals from 1.0 to 0.03 by 4000 steps.
         max_size_triangular: int, max size for dim's preconditioner to be triangular.
@@ -205,13 +203,6 @@ def scale_by_kron(
         if isinstance(preconditioner_update_probability, Callable):
             update_prob_in = preconditioner_update_probability(count_inc)
 
-        # normalize grads
-        if normalize_grads:
-            updates = jax.tree.map(
-                lambda g: g / (jnp.linalg.norm(g) + 1e-16),
-                updates,
-            )
-
         # momentum
         mu = None
         momentum_updates = updates
@@ -323,6 +314,15 @@ def scale_by_kron(
                 )
             ]
 
+        # RMS of pre_grad should be 1.0, so let's cap at 1.1
+        def _clip_fn(u):
+            clip_denom = jnp.maximum(
+                1.0,
+                jnp.sqrt(jnp.mean(numerics.abs_sq(u))) / 1.1)
+            return u / clip_denom
+
+        precond_gs = jax.tree.map(_clip_fn, precond_gs)
+
         # box preconditioned grads
         if flax_partitioned:
             precond_gs = [
@@ -351,7 +351,6 @@ def scale_by_kron(
 def kron(
     learning_rate: Union[float, Callable[[int], float]] = 0.001,
     b1: float = 0.9,
-    normalize_grads: bool = False,
     weight_decay: float = 0.0,
     weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
     preconditioner_update_probability: Union[
@@ -377,7 +376,6 @@ def kron(
     Args:
         learning_rate: float or callable, learning rate.
         b1: float, momentum parameter.
-        normalize_grads: bool, whether to normalize gradients to unit norm layer-wise.
         weight_decay: float, weight decay.
         weight_decay_mask: optional Any or callable, pytree of bool same structure
             as params with weight decay applied to True elements.
@@ -413,7 +411,6 @@ def kron(
     optimizer = [
         scale_by_kron(
             b1=b1,
-            normalize_grads=normalize_grads,
             preconditioner_update_probability=preconditioner_update_probability,
             max_size_triangular=max_size_triangular,
             min_ndim_triangular=min_ndim_triangular,
